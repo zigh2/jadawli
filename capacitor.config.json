@@ -1,0 +1,6 @@
+{
+  "appId": "com.jadawli.app",
+  "appName": "جداولي",
+  "webDir": "www",
+  "android": { "backgroundColor": "#f8fafc" }
+}
