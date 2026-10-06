@@ -61,7 +61,7 @@ function pinBox(title, again) {
 const empty = (t, p, label, href) => h('div', { class: 'empty' }, h('h2', {}, t), h('p', {}, p), label && h('a', { class: 'btn', href }, label));
 const taken = (name, except) => S.tables.some(t => t.id !== except && t.title.trim().toLowerCase() === name.trim().toLowerCase());
 const todayIdx = t => { const d = ymd(new Date()); return t.rows.findIndex(r => r.includes(d)); };
-const parseDur = s => { const m = /^(\d+):([0-5]?\d)$/.exec(String(s || '').trim()); return m ? +m[1] * 60 + +m[2] : null; };
+const parseDur = s => { s = String(s || '').trim(); const m = /^(\d+):([0-5]?\d)$/.exec(s); if (m) return +m[1] * 60 + +m[2]; return /^\d+(\.\d+)?$/.test(s) ? parseFloat(s) : null; };
 const fmtDur = m => `${Math.floor(m / 60)}:${pad(Math.round(m % 60))}`;
 const fmt = n => String(Math.round(n * 100) / 100);
 
@@ -86,7 +86,7 @@ async function reload(id) {
   S.tables = (await DB.tables()).sort((a, b) => a.id - b.id);
   const real = S.tables.filter(t => !t.isTemplate);
   const want = id != null ? id : (S.cur ? S.cur.id : S.meta.cur);
-  S.cur = real.find(t => t.id === want) || real[0] || null;
+  S.cur = real.find(t => t.id === want) || real.find(t => todayIdx(t) >= 0) || real[0] || null;
   S.data = S.cur ? await DB.cells(S.cur.id) : {};
   if (S.cur) { S.meta.cur = S.cur.id; DB.setMeta('cur', S.cur.id); }
 }
@@ -110,14 +110,6 @@ async function generate(tp, title, month, year) {
   const rows = Array.from({ length: n }, (_, i) => `${year}-${pad(month)}-${pad(i + 1)} (${DAYS[new Date(year, month - 1, i + 1).getDay()]})`);
   return DB.putTable({ title, columns: tp.columns, rows, keyCols: tp.keyCols, isTemplate: false });
 }
-async function seed() {
-  const cols = defCols(), keys = ['التاريخ', 'اليوم'], now = new Date();
-  const tp = { title: 'قالب يومية', columns: cols, rows: [], keyCols: keys, isTemplate: true };
-  await DB.putTable(tp);
-  await generate(tp, `يومية ${MONTHS[now.getMonth()]} ${now.getFullYear()}`, now.getMonth() + 1, now.getFullYear());
-  S.meta.seeded = true; await DB.setMeta('seeded', true);
-}
-
 /* ---------- الراوتر والهيكل ---------- */
 const routes = { home: renderHome, stats: renderStats, manage: renderManage, edit: renderEdit, settings: renderSettings };
 const TABS = [['home', '📊', 'الجدول'], ['stats', '📈', 'إحصائيات'], ['manage', '🗂️', 'الجداول'], ['settings', '⚙️', 'الإعدادات']];
@@ -145,7 +137,7 @@ function tableSelect() {
 }
 
 /* ---------- الشاشة الرئيسية ---------- */
-function field(t, r, c) {
+function field(t, r, c, card) {
   const v = val(t, r, c.name), save = x => setCell(t.id, r, c.name, x);
   if (t.keyCols.includes(c.name)) return h('span', { class: 'key' }, v);
   const inp = (type, o = {}) => {
@@ -167,23 +159,46 @@ function field(t, r, c) {
       };
       e.addEventListener('change', chk); chk(); return e;
     }
-    case 'number': { const e = inp('number', { step: 'any' }); e.setAttribute('inputmode', 'decimal'); return e; }
+    case 'number': {
+      const e = inp('number', { step: 'any' }); e.setAttribute('inputmode', 'decimal');
+      if (!card) return e;
+      const bump = d => { e.value = String(Math.round(((parseFloat(e.value) || 0) + d) * 1000) / 1000); save(e.value); };
+      return h('div', { class: 'step' }, h('button', { type: 'button', class: 'ib', onclick: () => bump(-1) }, '−'), e, h('button', { type: 'button', class: 'ib', onclick: () => bump(1) }, '+'));
+    }
     case 'time': return inp('time');
     case 'date': return inp('date');
     default: return inp('text');
   }
 }
+const hidKey = (t, c) => t.keyCols.includes(c.name) && (c.name === 'التاريخ' || c.name === 'اليوم');
+const shortLabel = r => { const m = /^\d{4}-\d{2}-(\d{2}) \((.+)\)$/.exec(r); return m ? `${m[1]} ${m[2]}` : r; };
 function tableView(t, ti) {
+  const cs = t.columns.filter(c => !hidKey(t, c)), runs = [];
+  cs.forEach(c => { const g = c.group || '', l = runs[runs.length - 1]; if (l && l.g === g) l.n++; else runs.push({ g, n: 1 }); });
+  const anyG = runs.some(x => x.g);
   return h('div', { class: 'pane' }, h('table', {},
-    h('thead', {}, h('tr', {}, h('th', {}, '#'), t.columns.map(c => h('th', { style: c.width ? `min-width:${c.width}px` : '' }, c.name)))),
-    h('tbody', {}, t.rows.map((r, i) => h('tr', { class: i === ti ? 'today' : '' }, h('th', { scope: 'row' }, r), t.columns.map(c => h('td', {}, field(t, r, c))))))));
+    h('thead', { class: anyG ? 'hasg' : '' },
+      anyG ? h('tr', {}, h('th', {}), runs.map(x => h('th', { colspan: x.n, class: 'gh' }, x.g))) : null,
+      h('tr', {}, h('th', {}, '#'), cs.map(c => h('th', { style: c.width ? `min-width:${c.width}px` : '' }, c.name)))),
+    h('tbody', {}, t.rows.map((r, i) => h('tr', { class: i === ti ? 'today' : '' }, h('th', { scope: 'row' }, shortLabel(r)), cs.map(c => h('td', {}, field(t, r, c))))))));
 }
 function cardEl(t, i, ti) {
-  const r = t.rows[i];
-  return h('article', { class: 'card' + (i === ti ? ' today' : '') }, h('h3', {}, '📌 ' + r),
-    t.columns.filter(c => !t.keyCols.includes(c.name)).map(c => c.type === 'checkbox'
-      ? h('label', { class: 'f chk' }, field(t, r, c), h('span', {}, c.name))
-      : h('label', { class: 'f' }, h('span', {}, c.name), field(t, r, c))));
+  const r = t.rows[i], cs = t.columns.filter(c => !t.keyCols.includes(c.name)), cbs = cs.filter(c => c.type === 'checkbox');
+  const anyG = cs.some(c => c.group), prog = h('span', { class: 'prog' }), fill = h('i', {});
+  const upd = () => {
+    const d = cbs.filter(c => val(t, r, c.name) === '1').length;
+    prog.textContent = `${d} / ${cbs.length}`; fill.style.width = (cbs.length ? Math.round(d / cbs.length * 100) : 0) + '%';
+  };
+  let last = null;
+  const body = cs.map(c => {
+    const g = c.group || (anyG ? 'أخرى' : ''), head = g && g !== last ? h('h4', { class: 'grp' }, g) : null; last = g;
+    const f = c.type === 'checkbox' ? h('label', { class: 'f chk' }, field(t, r, c, true), h('span', {}, c.name))
+      : h(c.type === 'number' ? 'div' : 'label', { class: 'f' }, h('span', {}, c.name), field(t, r, c, true));
+    return [head, f];
+  });
+  const el = h('article', { class: 'card' + (i === ti ? ' today' : ''), onchange: upd }, h('h3', {}, h('span', {}, '📌 ' + r), cbs.length ? prog : null),
+    cbs.length ? h('div', { class: 'meter' }, fill) : null, body);
+  upd(); return el;
 }
 function singleView(t, ti) {
   const n = t.rows.length;
@@ -206,21 +221,38 @@ function scrollToday() {
   const el = $('.today');
   if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
 }
+const viewMode = t => S.view || (t.columns.length > 8 ? 'card' : 'table');
+const hasDates = t => t.rows.some(r => /^\d{4}-\d{2}-\d{2}/.test(r));
+const lastDate = t => t.rows.reduce((a, r) => { const m = /^\d{4}-\d{2}-\d{2}/.exec(r); return m && m[0] > a ? m[0] : a; }, '');
+const monthCovered = (y, m) => S.tables.some(t => !t.isTemplate && t.rows.some(r => r.startsWith(`${y}-${pad(m)}-`)));
+const baseName = s => (s.replace(/^قالب\s+/, '').replace(new RegExp(`\\s*(${MONTHS.join('|')})\\s*\\d{4}$`), '').trim() || s);
+const newestFirst = a => a.sort((x, y) => lastDate(y).localeCompare(lastDate(x)));
+function uniqueTitle(base) { let n = base, k = 2; while (taken(n)) n = `${base} (${k++})`; return n; }
+async function makeMonth(src, m, y) {
+  const id = await generate(src, uniqueTitle(`${baseName(src.title)} ${MONTHS[m - 1]} ${y}`), m, y);
+  await reload(id); S.idx = Math.max(todayIdx(S.cur), 0); return id;
+}
+function importFile() { S.busy = true; setTimeout(() => { S.busy = false; }, 30000); $('#imp').click(); }
 function renderHome(bar, view) {
   const t = S.cur;
   if (!t) {
     bar.append(h('h1', {}, 'جداولي'), themeBtn());
-    view.append(empty('لا توجد جداول بعد', 'أنشئ جدولاً جديداً أو ولّده من قالب.', 'إدارة الجداول', '#/manage'));
+    view.append(h('div', { class: 'empty' }, h('h2', {}, 'ابدأ من هنا'), h('p', {}, 'استورد جداولك السابقة من ملف نسخة احتياطية، أو أنشئ جدولاً جديداً.'),
+      h('div', { class: 'btns', style: 'flex-direction:column' }, h('button', { onclick: () => importFile() }, '⬆️ استيراد بياناتي'), h('a', { class: 'btn ghost', href: '#/edit' }, 'إنشاء جدول جديد'))));
     return;
   }
-  const ti = todayIdx(t);
-  bar.append(tableSelect(), h('button', { class: 'ib txt', disabled: ti < 0, onclick: () => { S.idx = ti; if (S.view === 'card') render('home'); else scrollToday(); } }, 'اليوم'), themeBtn());
+  const ti = todayIdx(t), mode = viewMode(t), now = new Date();
+  bar.append(tableSelect(), h('button', { class: 'ib txt', disabled: ti < 0, onclick: () => { S.idx = ti; if (mode === 'card') render('home'); else scrollToday(); } }, 'اليوم'), themeBtn());
+  const src = newestFirst(S.tables.filter(x => !x.isTemplate && hasDates(x)))[0];
+  const banner = src && !monthCovered(now.getFullYear(), now.getMonth() + 1)
+    ? h('div', { class: 'banner' }, h('span', {}, `لا يوجد جدول لشهر ${MONTHS[now.getMonth()]}.`),
+      h('button', { class: 'btn ok sm', onclick: async () => { await makeMonth(src, now.getMonth() + 1, now.getFullYear()); toast('تم توليد جدول الشهر'); render('home'); } }, `ولّده بنفس بنية «${src.title}»`)) : null;
   const seg = h('div', { class: 'seg' }, [['table', 'جدول'], ['card', 'بطاقة'], ['all', 'كل البطاقات']].map(([k, l]) =>
-    h('button', { class: S.view === k ? 'on' : '', onclick: () => { S.view = k; DB.setMeta('view', k); render('home'); } }, l)));
+    h('button', { class: mode === k ? 'on' : '', onclick: () => { S.view = k; DB.setMeta('view', k); render('home'); } }, l)));
   const body = !t.rows.length ? empty('لا توجد أسطر في هذا الجدول', 'أضف أسطراً من شاشة التعديل.', 'تعديل الجدول', '#/edit/' + t.id)
-    : S.view === 'table' ? tableView(t, ti) : S.view === 'card' ? singleView(t, ti) : allView(t, ti);
-  view.append(h('div', { class: 'col' }, seg, body));
-  if (S.view !== 'card') setTimeout(scrollToday, 150);
+    : mode === 'table' ? tableView(t, ti) : mode === 'card' ? singleView(t, ti) : allView(t, ti);
+  view.append(h('div', { class: 'col' }, banner, seg, body));
+  if (mode !== 'card') setTimeout(scrollToday, 150);
 }
 
 /* ---------- الإحصائيات ---------- */
@@ -232,62 +264,66 @@ function streaks(f) {
   return { best, cur };
 }
 function statsFor(t) {
-  const ti = todayIdx(t), rows = t.rows.slice(0, ti >= 0 ? ti + 1 : t.rows.length), note = ti >= 0 ? ' (حتى اليوم)' : '';
-  const out = [], vals = c => rows.map(r => (S.data[r] || {})[c.name]);
-  const data = t.columns.filter(c => !t.keyCols.includes(c.name));
+  const ti = todayIdx(t), rows = t.rows.slice(0, ti >= 0 ? ti + 1 : t.rows.length);
+  const data = t.columns.filter(c => !t.keyCols.includes(c.name)), vals = c => rows.map(r => (S.data[r] || {})[c.name]);
   const logged = rows.filter(r => data.some(c => { const v = (S.data[r] || {})[c.name]; return v && v !== '0'; })).length;
-  out.push({ title: 'الأيام المسجّلة' + note, big: `${logged} / ${rows.length}`, pct: rows.length ? logged / rows.length : 0 });
+  const secs = new Map(), TN = { checkbox: 'المهام', number: 'الأرقام', duration: 'المدد', select: 'القوائم', text: 'الملاحظات' };
+  const add = (c, row) => { const k = c.group || TN[c.type]; if (!secs.has(k)) secs.set(k, { title: k, rows: [], d: 0, n: 0 }); const s = secs.get(k); s.rows.push(row); return s; };
   data.forEach(c => {
     const vs = vals(c);
     if (c.type === 'checkbox') {
-      const f = vs.map(v => v === '1'), d = f.filter(Boolean).length, s = streaks(f);
-      out.push({ title: c.name + note, big: `${d} / ${f.length}`, pct: f.length ? d / f.length : 0,
-        lines: [`أطول سلسلة متتالية: ${s.best}`, ti >= 0 && `السلسلة الحالية: ${s.cur}`] });
+      const f = vs.map(v => v === '1'), d = f.filter(Boolean).length, st = streaks(f);
+      const s = add(c, { label: c.name, value: `${d} / ${f.length}`, pct: f.length ? d / f.length : 0, sub: `أطول سلسلة ${st.best}` + (ti >= 0 ? `، الحالية ${st.cur}` : '') });
+      s.d += d; s.n += f.length;
     } else if (c.type === 'number') {
       const n = vs.map(parseFloat).filter(x => !isNaN(x));
-      if (n.length) { const sum = n.reduce((a, b) => a + b, 0); out.push({ title: c.name, big: fmt(sum), lines: [`المتوسط: ${fmt(sum / n.length)}`, `الأعلى: ${fmt(Math.max(...n))}`, `عدد القيم: ${n.length}`] }); }
+      if (n.length) { const sum = n.reduce((a, b) => a + b, 0); add(c, { label: c.name, value: fmt(sum), sub: `المتوسط ${fmt(sum / n.length)}، الأعلى ${fmt(Math.max(...n))}، في ${n.length} يوم` }); }
     } else if (c.type === 'duration') {
       const m = vs.map(parseDur).filter(x => x != null);
-      if (m.length) { const sum = m.reduce((a, b) => a + b, 0); out.push({ title: c.name, big: fmtDur(sum), lines: [`المتوسط لليوم: ${fmtDur(sum / m.length)}`, `عدد الأيام: ${m.length}`] }); }
+      if (m.length) { const sum = m.reduce((a, b) => a + b, 0); add(c, { label: c.name, value: fmtDur(sum), sub: `المتوسط ${fmtDur(sum / m.length)}، في ${m.length} يوم` }); }
     } else if (c.type === 'select') {
       const cnt = new Map(); vs.filter(Boolean).forEach(v => cnt.set(v, (cnt.get(v) || 0) + 1));
-      if (cnt.size) out.push({ title: c.name, chips: [...cnt].map(([k, n]) => `${k}: ${n}`) });
-    } else if (c.type === 'text') {
-      const n = vs.filter(Boolean).length; if (n) out.push({ title: c.name, lines: [`عدد الأيام المكتوبة: ${n}`] });
+      if (cnt.size) add(c, { label: c.name, value: String(vs.filter(Boolean).length), sub: [...cnt].map(([k, n]) => `${k}: ${n}`).join('، ') });
+    } else {
+      const n = vs.filter(Boolean).length; if (n) add(c, { label: c.name, value: String(n), sub: 'أيام فيها كتابة' });
     }
   });
-  return out;
+  return { logged, total: rows.length, note: ti >= 0 ? ' (حتى اليوم)' : '', sections: [...secs.values()] };
 }
+const meter = p => h('div', { class: 'meter' }, h('i', { style: `width:${Math.round(p * 100)}%` }));
 function renderStats(bar, view) {
-  if (!S.cur) { bar.append(h('h1', {}, 'الإحصائيات')); view.append(empty('لا توجد جداول', 'أنشئ جدولاً أولاً.', 'إدارة الجداول', '#/manage')); return; }
+  if (!S.cur) { bar.append(h('h1', {}, 'الإحصائيات')); view.append(empty('لا توجد جداول', 'أنشئ جدولاً أو استورد بياناتك أولاً.', 'إدارة الجداول', '#/manage')); return; }
   bar.append(tableSelect());
-  statsFor(S.cur).forEach(s => view.append(h('section', { class: 'stat' }, h('h3', {}, s.title), s.big && h('div', { class: 'big' }, s.big),
-    s.pct != null && h('div', { class: 'meter' }, h('i', { style: `width:${Math.round(s.pct * 100)}%` })),
-    (s.lines || []).filter(Boolean).map(l => h('p', {}, l)), s.chips && h('div', { class: 'chips' }, s.chips.map(c => h('span', {}, c))))));
+  const st = statsFor(S.cur);
+  view.append(h('section', { class: 'stat' }, h('h3', {}, 'الأيام المسجّلة' + st.note), h('div', { class: 'big' }, `${st.logged} / ${st.total}`), meter(st.total ? st.logged / st.total : 0)));
+  st.sections.forEach(s => view.append(h('section', { class: 'sec' }, h('h2', {}, s.title + (s.n ? ` — ${Math.round(s.d / s.n * 100)}%` : '')),
+    s.rows.map(r => h('div', { class: 'srow2' }, h('div', { class: 'l' }, h('b', {}, r.label), h('b', {}, r.value)), r.pct != null ? meter(r.pct) : null, r.sub ? h('small', {}, r.sub) : null)))));
 }
 
 /* ---------- إدارة الجداول ---------- */
 function renderManage(bar, view) {
   bar.append(h('h1', {}, 'الجداول'), h('a', { class: 'btn sm', href: '#/edit' }, '＋ جدول جديد'));
   const tpls = S.tables.filter(t => t.isTemplate), real = S.tables.filter(t => !t.isTemplate), now = new Date();
+  const srcs = [...newestFirst(real.slice()), ...tpls];
+  const nextM = monthCovered(now.getFullYear(), now.getMonth() + 1) ? new Date(now.getFullYear(), now.getMonth() + 1, 1) : now;
   let touched = false;
   const title = h('input', { placeholder: 'اسم الجدول الجديد', oninput: () => { touched = true; } });
-  const tpl = h('select', {}, tpls.map(x => h('option', { value: x.id }, x.title)));
-  const mon = h('select', { onchange: () => auto() }, MONTHS.map((m, i) => h('option', { value: i + 1, selected: i === now.getMonth() }, m)));
-  const yr = h('input', { type: 'number', value: now.getFullYear(), min: 2000, max: 2100, oninput: () => auto() });
-  function auto() { if (!touched) title.value = `يومية ${MONTHS[mon.value - 1]} ${yr.value}`; }
+  const tpl = h('select', { onchange: () => auto() }, srcs.map(x => h('option', { value: x.id }, (x.isTemplate ? 'قالب: ' : 'بنية: ') + x.title)));
+  const mon = h('select', { onchange: () => auto() }, MONTHS.map((m, i) => h('option', { value: i + 1, selected: i === nextM.getMonth() }, m)));
+  const yr = h('input', { type: 'number', value: nextM.getFullYear(), min: 2000, max: 2100, oninput: () => auto() });
+  function auto() { const sc = srcs.find(x => x.id === +tpl.value); if (!touched && sc) title.value = uniqueTitle(`${baseName(sc.title)} ${MONTHS[mon.value - 1]} ${yr.value}`); }
   auto();
-  const gen = h('section', { class: 'sec' }, h('h2', {}, '📅 توليد جدول شهري من قالب'),
-    tpls.length ? [h('div', { class: 'grid' }, h('div', {}, h('label', {}, 'الاسم'), title), h('div', {}, h('label', {}, 'القالب'), tpl), h('div', {}, h('label', {}, 'الشهر'), mon), h('div', {}, h('label', {}, 'السنة'), yr)),
+  const gen = h('section', { class: 'sec' }, h('h2', {}, '📅 توليد جدول شهري'),
+    srcs.length ? [h('div', { class: 'grid' }, h('div', {}, h('label', {}, 'الاسم'), title), h('div', {}, h('label', {}, 'نسخ البنية من'), tpl), h('div', {}, h('label', {}, 'الشهر'), mon), h('div', {}, h('label', {}, 'السنة'), yr)),
       h('button', { class: 'btn ok', onclick: async () => {
-        const tp = tpls.find(x => x.id === +tpl.value), name = title.value.trim(), y = +yr.value;
+        const tp = srcs.find(x => x.id === +tpl.value), name = title.value.trim(), y = +yr.value;
         if (!name) return toast('أدخل اسم الجدول', true);
         if (taken(name)) return toast('هذا الاسم مستخدم مسبقاً', true);
         if (!(y >= 2000 && y <= 2100)) return toast('السنة غير صحيحة', true);
         const id = await generate(tp, name, +mon.value, y);
         await reload(id); S.idx = Math.max(todayIdx(S.cur), 0); toast('تم توليد الجدول'); location.hash = '#/home';
       } }, '🚀 توليد الجدول')]
-      : h('p', { class: 'msg' }, 'لا يوجد قالب بعد. أنشئ جدولاً وفعّل خيار «حفظ كقالب» ثم عد هنا.'));
+      : h('p', { class: 'msg' }, 'أنشئ جدولاً أو قالباً أولاً ثم عد هنا.'));
   const dup = async t => {
     let n = `${t.title} (نسخة)`, k = 2; while (taken(n)) n = `${t.title} (نسخة ${k++})`;
     await DB.putTable({ title: n, columns: t.columns, rows: t.rows, keyCols: t.keyCols, isTemplate: t.isTemplate });
@@ -308,13 +344,15 @@ function renderManage(bar, view) {
 function colRow(c, isKey) {
   const typ = h('select', { class: 'ctype', onchange: () => sync() }, Object.entries(TYPES).map(([k, l]) => h('option', { value: k, selected: k === c.type }, l)));
   const opts = h('input', { class: 'copts', placeholder: 'خيارات القائمة مفصولة بفاصلة', value: c.options || '' });
+  const grp = h('input', { class: 'cgrp', placeholder: 'المجموعة (اختياري، مثل: الصلوات)', value: c.group || '' });
+  grp.setAttribute('list', 'grp-list');
   function sync() { opts.hidden = typ.value !== 'select'; }
   sync();
   return h('div', { class: 'crow', 'data-orig': c.name || '' }, h('span', { class: 'drag' }, '☰'),
     h('input', { class: 'cname', placeholder: 'اسم العمود', value: c.name || '' }), typ,
     h('input', { class: 'cw', type: 'number', placeholder: 'العرض', value: c.width || '' }),
     h('label', { class: 'kchk' }, h('input', { type: 'checkbox', class: 'ckey', checked: !!isKey }), 'مفتاحي'),
-    h('button', { class: 'x', title: 'حذف', onclick: e => e.currentTarget.closest('.crow').remove() }, '✕'), opts);
+    h('button', { class: 'x', title: 'حذف', onclick: e => e.currentTarget.closest('.crow').remove() }, '✕'), grp, opts);
 }
 const rowItem = name => h('div', { class: 'rrow', 'data-orig': name || '' }, h('span', { class: 'drag' }, '☰'),
   h('input', { class: 'rname', placeholder: 'مفتاح السطر', value: name || '' }),
@@ -326,18 +364,19 @@ function renderEdit(bar, view, arg) {
   const title = h('input', { value: t.title, placeholder: 'عنوان الجدول', style: 'width:100%' });
   const tmpl = h('input', { type: 'checkbox', checked: t.isTemplate });
   const cols = h('div', {}, t.columns.map(c => colRow(c, t.keyCols.includes(c.name))));
+  const glist = h('datalist', { id: 'grp-list' }, [...new Set(S.tables.flatMap(x => x.columns.map(c => c.group)).filter(Boolean))].map(g => h('option', { value: g })));
   const rows = h('div', {}, t.rows.map(rowItem));
   const bulk = h('textarea', { rows: 3, placeholder: 'أضف عدة أسطر دفعة واحدة — سطر لكل مفتاح', style: 'width:100%' });
   const save = async () => {
     const name = title.value.trim();
-    const C = $$('.crow', cols).map(el => ({ name: $('.cname', el).value.trim(), type: $('.ctype', el).value, width: $('.cw', el).value.trim(), options: $('.copts', el).value.trim(), key: $('.ckey', el).checked, orig: el.dataset.orig })).filter(c => c.name);
+    const C = $$('.crow', cols).map(el => ({ name: $('.cname', el).value.trim(), type: $('.ctype', el).value, width: $('.cw', el).value.trim(), options: $('.copts', el).value.trim(), group: $('.cgrp', el).value.trim(), key: $('.ckey', el).checked, orig: el.dataset.orig })).filter(c => c.name);
     const R = $$('.rrow', rows).map(el => ({ name: $('.rname', el).value.trim(), orig: el.dataset.orig })).filter(r => r.name);
     if (!name) return toast('أدخل عنواناً', true);
     if (taken(name, old && old.id)) return toast('العنوان مستخدم مسبقاً', true);
     if (!C.length) return toast('أضف عموداً واحداً على الأقل', true);
     if (new Set(C.map(c => c.name)).size !== C.length) return toast('أسماء الأعمدة يجب ألا تتكرر', true);
     if (new Set(R.map(r => r.name)).size !== R.length) return toast('مفاتيح الأسطر يجب ألا تتكرر', true);
-    const rec = { title: name, isTemplate: tmpl.checked, keyCols: C.filter(c => c.key).map(c => c.name), columns: C.map(({ name, type, width, options }) => ({ name, type, width, options })), rows: R.map(r => r.name) };
+    const rec = { title: name, isTemplate: tmpl.checked, keyCols: C.filter(c => c.key).map(c => c.name), columns: C.map(({ name, type, width, options, group }) => ({ name, type, width, options, group })), rows: R.map(r => r.name) };
     if (old) rec.id = old.id;
     const id = await DB.putTable(rec);
     if (old) {
@@ -351,7 +390,7 @@ function renderEdit(bar, view, arg) {
   bar.append(h('h1', {}, old ? 'تعديل الجدول' : 'جدول جديد'), h('button', { class: 'btn sm', onclick: save }, '💾 حفظ'));
   view.append(
     h('section', { class: 'sec' }, title, h('label', { class: 'kchk', style: 'margin-top:10px;font-size:14px' }, tmpl, 'حفظ كقالب (يُستخدم لتوليد جداول شهرية)')),
-    h('section', { class: 'sec' }, h('h2', {}, 'الأعمدة'), cols, h('button', { class: 'btn ok sm', onclick: () => cols.append(colRow({ type: 'text' }, false)) }, '＋ عمود')),
+    h('section', { class: 'sec' }, h('h2', {}, 'الأعمدة'), glist, cols, h('button', { class: 'btn ok sm', onclick: () => cols.append(colRow({ type: 'text' }, false)) }, '＋ عمود')),
     h('section', { class: 'sec' }, h('h2', {}, 'الأسطر'), rows,
       h('div', { class: 'btns' }, h('button', { class: 'btn ok', onclick: () => rows.append(rowItem('')) }, '＋ سطر')), bulk,
       h('div', { class: 'btns' }, h('button', { class: 'btn ghost', onclick: () => {
@@ -414,18 +453,29 @@ function validBackup(j) {
   return j && Array.isArray(j.tables) && Array.isArray(j.cells) && j.tables.every(t => Number.isInteger(t.id) && typeof t.title === 'string' && Array.isArray(t.columns) && t.columns.every(c => c && typeof c.name === 'string') && Array.isArray(t.rows) && Array.isArray(t.keyCols))
     && j.cells.every(c => c && Number.isInteger(c.t) && typeof c.r === 'string' && typeof c.c === 'string');
 }
+const choiceBox = (msg, opts) => modal(close => [h('p', {}, msg), h('div', { class: 'btns', style: 'flex-direction:column' },
+  opts.map(([k, l]) => h('button', { class: k === 'replace' ? 'danger' : '', onclick: () => close(k) }, l)), h('button', { class: 'btn ghost', onclick: () => close(null) }, 'إلغاء'))]);
+const cleanTable = t => ({ id: t.id, title: String(t.title), isTemplate: !!t.isTemplate, keyCols: t.keyCols.map(String), rows: t.rows.map(String),
+  columns: t.columns.map(c => ({ name: String(c.name), type: TYPES[c.type] ? c.type : 'text', width: String(c.width || ''), options: String(c.options || ''), group: String(c.group || '') })) });
+async function doImport(f) {
+  let j; try { j = JSON.parse(await f.text()); } catch (e) { return toast('الملف غير صالح', true); }
+  if (!validBackup(j)) return toast('هذه ليست نسخة احتياطية صالحة', true);
+  const mode = S.tables.length ? await choiceBox(`الملف يحتوي ${j.tables.length} جدولاً/قالباً.`, [['merge', 'إضافتها إلى الموجود'], ['replace', 'استبدال كل البيانات الحالية']]) : 'replace';
+  if (!mode) return;
+  const tables = j.tables.map(cleanTable), cells = j.cells.filter(x => x.v !== '' && x.v != null).map(x => ({ t: x.t, r: x.r, c: x.c, v: String(x.v) }));
+  if (mode === 'replace') await DB.replaceAll(tables, cells);
+  else {
+    const ids = new Map();
+    for (const t of tables) { const { id, ...rec } = t, title = uniqueTitle(t.title), nid = await DB.putTable({ ...rec, title }); ids.set(id, nid); S.tables.push({ id: nid, title, columns: [], rows: [] }); }
+    await DB.putCells(cells.filter(x => ids.has(x.t)).map(x => ({ ...x, t: ids.get(x.t) })));
+  }
+  await reload(); S.idx = Math.max(S.cur ? todayIdx(S.cur) : 0, 0); toast(`تم استيراد ${tables.length} جدولاً/قالباً`); render(S.route);
+}
 function renderSettings(bar, view) {
   bar.append(h('h1', {}, 'الإعدادات'));
   const row = (label, ctl, sub) => h('div', { class: 'srow' }, h('div', {}, h('b', {}, label), sub && h('small', {}, sub)), ctl);
   const tog = (on, fn) => h('input', { type: 'checkbox', class: 'toggle', checked: !!on, onchange: e => fn(e.target.checked, e.target) });
   const meta = (k, v) => { S.meta[k] = v; return DB.setMeta(k, v); };
-  const file = h('input', { type: 'file', accept: '.json,application/json', hidden: true, onchange: async e => {
-    const f = e.target.files[0]; e.target.value = ''; if (!f) return;
-    let j; try { j = JSON.parse(await f.text()); } catch (x) { return toast('الملف غير صالح', true); }
-    if (!validBackup(j)) return toast('هذه ليست نسخة احتياطية صالحة', true);
-    if (!await confirmBox(`استبدال كل البيانات الحالية بنسخة تحتوي ${j.tables.length} جدولاً؟`, 'استبدال')) return;
-    await DB.replaceAll(j.tables, j.cells); await reload(); S.idx = Math.max(S.cur ? todayIdx(S.cur) : 0, 0); toast('تمت الاستعادة'); render('settings');
-  } });
   const timeIn = h('input', { type: 'time', value: (S.meta.rem || {}).time || '21:00', onchange: async e => {
     await meta('rem', { ...(S.meta.rem || {}), time: e.target.value }); if ((S.meta.rem || {}).on) applyReminder();
   } });
@@ -450,8 +500,8 @@ function renderSettings(bar, view) {
     h('section', { class: 'sec' }, h('h2', {}, 'النسخ الاحتياطي والتصدير'),
       h('div', { class: 'btns', style: 'flex-direction:column' },
         h('button', { onclick: async () => saveFile(`jadawli-backup-${ymd(new Date())}.json`, 'application/json', JSON.stringify({ app: 'jadawli', v: 1, exported: new Date().toISOString(), ...await DB.exportAll() })) }, '⬇️ تصدير نسخة احتياطية (JSON)'),
-        h('button', { class: 'btn ghost', onclick: () => { S.busy = true; setTimeout(() => { S.busy = false; }, 30000); file.click(); } }, '⬆️ استيراد نسخة احتياطية'),
-        h('button', { class: 'btn ghost', disabled: !S.cur, onclick: () => saveFile(`${S.cur.title}.csv`, 'text/csv', toCsv(S.cur)) }, '📄 تصدير الجدول الحالي (CSV)')), file),
+        h('button', { class: 'btn ghost', onclick: () => importFile() }, '⬆️ استيراد نسخة احتياطية'),
+        h('button', { class: 'btn ghost', disabled: !S.cur, onclick: () => saveFile(`${S.cur.title}.csv`, 'text/csv', toCsv(S.cur)) }, '📄 تصدير الجدول الحالي (CSV)'))),
     h('section', { class: 'sec' }, h('h2', {}, 'البيانات'),
       row('حذف كل البيانات', h('button', { class: 'danger sm', onclick: async () => {
         if (!await confirmBox('سيتم حذف كل الجداول والبيانات من هذا الجهاز نهائياً. تأكد من وجود نسخة احتياطية.', 'حذف الكل')) return;
@@ -462,16 +512,16 @@ function renderSettings(bar, view) {
 /* ---------- الإقلاع ---------- */
 async function boot() {
   try { await DB.open(); } catch (e) { document.body.textContent = 'تعذّر فتح التخزين المحلي على هذا الجهاز'; return; }
-  S.meta = await DB.meta(); S.view = S.meta.view || 'table';
-  if (!S.meta.seeded && !(await DB.tables()).length) await seed();
+  S.meta = await DB.meta(); S.view = S.meta.view || null;
   await reload(); S.idx = Math.max(S.cur ? todayIdx(S.cur) : 0, 0);
   applyTheme(); mq.addEventListener && mq.addEventListener('change', applyTheme);
+  $('#imp').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; S.busy = false; if (f) doImport(f); });
   window.addEventListener('hashchange', route);
   document.addEventListener('visibilitychange', () => { if (document.hidden && S.meta.lock && !S.busy) showLock(); });
   if (S.meta.lock) showLock();
   route();
   if ('serviceWorker' in navigator && !native && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
-window.__app = { S, boot, render, statsFor, toCsv, validBackup, generate, todayIdx };
+window.__app = { S, boot, render, statsFor, toCsv, validBackup, generate, todayIdx, doImport, makeMonth, monthCovered };
 boot();
 })();

@@ -45,6 +45,11 @@ const DB = (() => {
       moved.forEach(x => st.put(x));
       await done(tx);
     },
+    async putCells(list) {
+      const tx = db.transaction('cells', 'readwrite');
+      list.forEach(x => tx.objectStore('cells').put({ k: ck(x.t, x.r, x.c), t: x.t, r: x.r, c: x.c, v: x.v }));
+      await done(tx);
+    },
     async meta() {
       const o = {};
       (await rp(os('meta').getAll())).forEach(x => { o[x.key] = x.value; });
