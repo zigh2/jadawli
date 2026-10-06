@@ -79,3 +79,15 @@ td input:not([type=checkbox]),td select{width:100%;min-width:70px;padding:6px;te
 #lock{position:fixed;inset:0;z-index:4000;background:#fff;color:#333;font-family:monospace;padding:calc(40px + var(--ti)) 20px;direction:ltr;user-select:none;-webkit-user-select:none}
 #lock *{font-family:monospace}
 .sw{display:inline-block;padding:5px;margin:-5px;cursor:default}
+thead th{white-space:normal;line-height:1.25;font-size:12px;padding:6px 4px}
+thead.hasg tr:first-child th{height:30px}
+thead.hasg tr+tr th{top:30px}
+.gh{background:color-mix(in srgb,var(--pri) 78%,#000)!important;font-size:12px}
+.card h3{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.card .meter{margin:-4px 0 12px}.prog{font-size:13px;color:var(--mute);font-weight:500}
+.grp{font-size:13px;color:var(--pri);margin:14px 0 8px;padding-bottom:4px;border-bottom:1px solid var(--line)}
+.step{display:flex;gap:8px}.step input{flex:1;text-align:center;font-size:18px;font-weight:700}.step .ib{min-width:48px;font-size:22px}
+.banner{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;background:color-mix(in srgb,var(--warn) 16%,var(--card));border:1px solid var(--warn);border-radius:10px;padding:10px 12px;font-size:14px}
+.cgrp{flex:1 1 100%}
+.srow2{padding:8px 0;border-bottom:1px solid var(--line)}.srow2:last-child{border:0}.srow2 .l{display:flex;justify-content:space-between;margin-bottom:5px}
+.srow2 small{display:block;color:var(--mute);font-size:12px;margin-top:4px}
