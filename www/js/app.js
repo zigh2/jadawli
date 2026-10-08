@@ -10,7 +10,7 @@ const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())
 const cap = window.Capacitor;
 const native = !!(cap && cap.isNativePlatform && cap.isNativePlatform());
 const plug = n => cap && cap.Plugins && cap.Plugins[n];
-const S = { tables: [], cur: null, data: {}, view: 'table', idx: 0, meta: {}, busy: false, route: 'home' };
+const S = { tables: [], cur: null, data: {}, notes: { row: {}, table: '' }, notesTab: 'general', view: 'table', idx: 0, meta: {}, busy: false, route: 'home' };
 const defCols = () => [
   { name: 'التاريخ', type: 'text', width: '', options: '' },
   { name: 'اليوم', type: 'text', width: '', options: '' },
@@ -42,6 +42,7 @@ function modal(build) {
     m.hidden = false;
   });
 }
+window.App = { h, modal, toast };
 const confirmBox = (msg, ok = 'تأكيد') => modal(close => [h('p', {}, msg),
   h('div', { class: 'btns' }, h('button', { class: 'btn ghost', onclick: () => close(false) }, 'إلغاء'), h('button', { class: 'danger', onclick: () => close(true) }, ok))]);
 function pinBox(title, again) {
@@ -65,16 +66,19 @@ const parseDur = s => { s = String(s || '').trim(); const m = /^(\d+):([0-5]?\d)
 const fmtDur = m => `${Math.floor(m / 60)}:${pad(Math.round(m % 60))}`;
 const fmt = n => String(Math.round(n * 100) / 100);
 
-async function saveFile(name, mime, text) {
+const b64 = u8 => { let x = ''; for (let i = 0; i < u8.length; i += 0x8000) x += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(x); };
+async function saveFile(name, mime, data) {
   name = name.replace(/[\\/:*?"<>|]/g, '_');
-  const FS = plug('Filesystem'), SH = plug('Share');
+  const FS = plug('Filesystem'), SH = plug('Share'), bin = ArrayBuffer.isView(data);
   S.busy = true;
   try {
     if (native && FS && SH) {
-      const r = await FS.writeFile({ path: name, data: text, directory: 'CACHE', encoding: 'utf8' });
+      const o = { path: name, data: bin ? b64(data) : data, directory: 'CACHE' };
+      if (!bin) o.encoding = 'utf8';
+      const r = await FS.writeFile(o);
       await SH.share({ title: name, url: r.uri, dialogTitle: 'حفظ أو مشاركة الملف' });
     } else {
-      const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: mime })), download: name });
+      const a = h('a', { href: URL.createObjectURL(new Blob([data], { type: mime })), download: name });
       document.body.append(a); a.click(); a.remove();
     }
   } catch (e) { if (!/cancel/i.test(String((e && e.message) || e))) toast('تعذّر حفظ الملف', true); }
@@ -84,10 +88,12 @@ async function saveFile(name, mime, text) {
 /* ---------- البيانات ---------- */
 async function reload(id) {
   S.tables = (await DB.tables()).sort((a, b) => a.id - b.id);
+  for (const t of S.tables) if (!t.uid) await DB.putTable(t);   // جداول قديمة تحصل على معرّف ثابت للمزامنة لاحقاً
   const real = S.tables.filter(t => !t.isTemplate);
   const want = id != null ? id : (S.cur ? S.cur.id : S.meta.cur);
   S.cur = real.find(t => t.id === want) || real.find(t => todayIdx(t) >= 0) || real[0] || null;
   S.data = S.cur ? await DB.cells(S.cur.id) : {};
+  S.notes = S.cur ? await loadNotes(S.cur.id) : { row: {}, table: '' };
   if (S.cur) { S.meta.cur = S.cur.id; DB.setMeta('cur', S.cur.id); }
 }
 async function pick(id) { await reload(id); S.idx = Math.max(todayIdx(S.cur), 0); render(S.route); }
@@ -110,9 +116,51 @@ async function generate(tp, title, month, year) {
   const rows = Array.from({ length: n }, (_, i) => `${year}-${pad(month)}-${pad(i + 1)} (${DAYS[new Date(year, month - 1, i + 1).getDay()]})`);
   return DB.putTable({ title, columns: tp.columns, rows, keyCols: tp.keyCols, isTemplate: false });
 }
+/* ---------- ملاحظات وأدوات مساعدة ---------- */
+async function loadNotes(tid) {
+  const n = { row: {}, table: '' };
+  (await DB.notes(tid)).forEach(x => { if (x.kind === 'row') n.row[x.r] = x.text; else if (x.kind === 'table') n.table = x.text; });
+  return n;
+}
+function setNote(kind, tid, r, text) {
+  const k = kind === 'row' ? `r|${tid}|${r}` : `t|${tid}`;
+  if (kind === 'row') { if (text) S.notes.row[r] = text; else delete S.notes.row[r]; } else S.notes.table = text;
+  (text ? DB.putNote({ k, t: tid, kind, r: r || '', text, u: Date.now() }) : DB.delNote(k)).then(flash, () => toast('تعذّر الحفظ', true));
+}
+const showVal = (c, x) => (!x ? '' : c.type === 'duration' && parseDur(x) != null ? fmtDur(parseDur(x)) : x);
+/* الأعمدة التي تنتمي لمجموعة واحدة تظهر معاً عند أول ظهور للمجموعة */
+function orderedCols(t) {
+  const out = [], done = new Set();
+  t.columns.forEach(c => {
+    if (done.has(c.name)) return;
+    const grp = c.group ? t.columns.filter(x => x.group === c.group) : [c];
+    grp.forEach(x => { out.push(x); done.add(x.name); });
+  });
+  return out;
+}
+const WORDS = ['شمس', 'قمر', 'نجمة', 'مدرسة', 'شجرة', 'سحابة', 'فراشة', 'تفاحة', 'برتقال', 'مكتبة', 'حديقة', 'جبل', 'بحر', 'طائرة', 'كتاب'];
+function challenge() {
+  let ans, q;
+  if (Math.random() < 0.5) { const a = 6 + Math.floor(Math.random() * 9), b = 3 + Math.floor(Math.random() * 7); q = `لتأكيد الحذف النهائي: ما ناتج ${a} × ${b} ؟`; ans = String(a * b); }
+  else { ans = WORDS[Math.floor(Math.random() * WORDS.length)]; q = `لتأكيد الحذف النهائي اكتب هذه الكلمة كما هي: «${ans}»`; }
+  const norm = x => x.replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).trim();
+  return modal(close => {
+    const i = h('input', { class: 'plain', placeholder: 'الإجابة' });
+    setTimeout(() => i.focus(), 60);
+    const go = () => { if (norm(i.value) === ans) close(true); else { toast('إجابة غير صحيحة — لم يُحذف شيء', true); close(false); } };
+    i.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+    return [h('p', {}, q), i, h('div', { class: 'btns' }, h('button', { class: 'btn ghost', onclick: () => close(false) }, 'إلغاء'), h('button', { class: 'danger', onclick: go }, 'حذف نهائي'))];
+  });
+}
+const rowNoteBox = (t, r) => modal(close => {
+  const ta = h('textarea', { rows: 5, placeholder: 'اكتب ملاحظة لهذا اليوم…', value: S.notes.row[r] || '' });
+  setTimeout(() => ta.focus(), 60);
+  return [h('p', {}, '📝 ' + r), ta, h('div', { class: 'btns' }, h('button', { class: 'btn ghost', onclick: () => close(null) }, 'إلغاء'), h('button', { onclick: () => close(ta.value.trim()) }, 'حفظ'))];
+});
+
 /* ---------- الراوتر والهيكل ---------- */
-const routes = { home: renderHome, stats: renderStats, manage: renderManage, edit: renderEdit, settings: renderSettings };
-const TABS = [['home', '📊', 'الجدول'], ['stats', '📈', 'إحصائيات'], ['manage', '🗂️', 'الجداول'], ['settings', '⚙️', 'الإعدادات']];
+const routes = { home: renderHome, stats: renderStats, notes: renderNotes, manage: renderManage, library: renderLibrary, edit: renderEdit, settings: renderSettings };
+const TABS = [['home', '📊', 'الجدول'], ['stats', '📈', 'إحصائيات'], ['notes', '📝', 'ملاحظات'], ['manage', '🗂️', 'الجداول'], ['settings', '⚙️', 'الإعدادات']];
 function route() {
   const p = (location.hash || '#/home').slice(2).split('/');
   render(routes[p[0]] ? p[0] : 'home', p[1]);
@@ -122,7 +170,7 @@ function render(name, arg) {
   const bar = $('#bar'), view = $('#view');
   bar.replaceChildren(); view.replaceChildren();
   routes[name](bar, view, arg);
-  const act = name === 'edit' ? 'manage' : name;
+  const act = name === 'edit' || name === 'library' ? 'manage' : name;
   $('#tabs').replaceChildren(...TABS.map(([k, ic, l]) => h('a', { href: '#/' + k, class: k === act ? 'on' : '' }, h('b', {}, ic), l)));
 }
 const themeBtn = () => h('button', { class: 'ib', title: 'المظهر', onclick: () => { S.meta.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; DB.setMeta('theme', S.meta.theme); applyTheme(); } }, '🌓');
@@ -151,13 +199,14 @@ function field(t, r, c, card) {
     case 'checkbox': return h('input', { type: 'checkbox', checked: v === '1', onchange: e => save(e.target.checked ? '1' : '0') });
     case 'select': return h('select', { onchange: e => save(e.target.value) }, h('option', { value: '' }, '--'),
       (c.options || '').split(',').map(o => o.trim()).filter(Boolean).map(o => h('option', { value: o, selected: o === v }, o)));
-    case 'duration': {
-      const e = inp('text', { placeholder: '0:00', dir: 'ltr' });
-      const chk = () => {
-        e.value = e.value.trim().replace(/^(\d+):(\d)$/, '$1:0$2');
-        e.classList.toggle('bad', !!e.value && parseDur(e.value) == null);
-      };
-      e.addEventListener('change', chk); chk(); return e;
+    case 'duration': case 'time': {
+      const cur = { v };
+      const btn = h('button', { type: 'button', class: 'tbtn' + (v ? '' : ' empty'), onclick: async () => {
+        const res = await Clock.pick({ mode: c.type, value: cur.v, title: c.name });
+        if (res == null) return;
+        cur.v = res; save(res); btn.textContent = showVal(c, res) || '--:--'; btn.classList.toggle('empty', !res);
+      } }, showVal(c, v) || '--:--');
+      return btn;
     }
     case 'number': {
       const e = inp('number', { step: 'any' }); e.setAttribute('inputmode', 'decimal');
@@ -165,25 +214,44 @@ function field(t, r, c, card) {
       const bump = d => { e.value = String(Math.round(((parseFloat(e.value) || 0) + d) * 1000) / 1000); save(e.value); };
       return h('div', { class: 'step' }, h('button', { type: 'button', class: 'ib', onclick: () => bump(-1) }, '−'), e, h('button', { type: 'button', class: 'ib', onclick: () => bump(1) }, '+'));
     }
-    case 'time': return inp('time');
     case 'date': return inp('date');
     default: return inp('text');
   }
 }
 const hidKey = (t, c) => t.keyCols.includes(c.name) && (c.name === 'التاريخ' || c.name === 'اليوم');
 const shortLabel = r => { const m = /^\d{4}-\d{2}-(\d{2}) \((.+)\)$/.exec(r); return m ? `${m[1]} ${m[2]}` : r; };
+const colStyle = c => { const w = c.width || (c.type === 'checkbox' ? '58' : ''); return w ? `width:${w}px;min-width:${w}px;max-width:${w}px` : ''; };
+function startResize(e, t, c, th) {
+  e.preventDefault(); e.stopPropagation();
+  const x0 = e.clientX, w0 = th.offsetWidth, tg = e.currentTarget; let w = w0;
+  if (tg.setPointerCapture) { try { tg.setPointerCapture(e.pointerId); } catch (x) {} }
+  const mv = ev => { w = Math.max(40, Math.min(420, Math.round(w0 + (x0 - ev.clientX)))); th.style.cssText = `width:${w}px;min-width:${w}px;max-width:${w}px`; };
+  const up = () => { tg.removeEventListener('pointermove', mv); tg.removeEventListener('pointerup', up); c.width = String(w); DB.putTable(t).then(flash); };
+  tg.addEventListener('pointermove', mv); tg.addEventListener('pointerup', up);
+}
 function tableView(t, ti) {
-  const cs = t.columns.filter(c => !hidKey(t, c)), runs = [];
+  const cs = orderedCols(t).filter(c => !hidKey(t, c)), runs = [];
   cs.forEach(c => { const g = c.group || '', l = runs[runs.length - 1]; if (l && l.g === g) l.n++; else runs.push({ g, n: 1 }); });
   const anyG = runs.some(x => x.g);
+  const head = c => {
+    const th = h('th', { style: colStyle(c) }, c.name);
+    th.append(h('span', { class: 'rz', title: 'اسحب لتغيير العرض، وانقر مرتين للضبط التلقائي', onpointerdown: e => startResize(e, t, c, th), ondblclick: () => { c.width = ''; DB.putTable(t); render('home'); } }));
+    return th;
+  };
   return h('div', { class: 'pane' }, h('table', {},
     h('thead', { class: anyG ? 'hasg' : '' },
-      anyG ? h('tr', {}, h('th', {}), runs.map(x => h('th', { colspan: x.n, class: 'gh' }, x.g))) : null,
-      h('tr', {}, h('th', {}, '#'), cs.map(c => h('th', { style: c.width ? `min-width:${c.width}px` : '' }, c.name)))),
-    h('tbody', {}, t.rows.map((r, i) => h('tr', { class: i === ti ? 'today' : '' }, h('th', { scope: 'row' }, shortLabel(r)), cs.map(c => h('td', {}, field(t, r, c))))))));
+      anyG ? h('tr', {}, h('th', {}), runs.map(x => h('th', { colspan: x.n, class: x.g ? 'gh' : 'gh0' }, x.g))) : null,
+      h('tr', {}, h('th', {}, '#'), cs.map(head))),
+    h('tbody', {}, t.rows.map((r, i) => h('tr', { class: i === ti ? 'today' : '' },
+      h('th', { scope: 'row', class: S.notes.row[r] ? 'hasnote' : '', title: 'ملاحظة اليوم', onclick: async e => {
+        const th = e.currentTarget, v = await rowNoteBox(t, r);
+        if (v == null) return;
+        setNote('row', t.id, r, v); th.classList.toggle('hasnote', !!v);
+      } }, shortLabel(r)),
+      cs.map(c => h('td', {}, field(t, r, c))))))));
 }
 function cardEl(t, i, ti) {
-  const r = t.rows[i], cs = t.columns.filter(c => !t.keyCols.includes(c.name)), cbs = cs.filter(c => c.type === 'checkbox');
+  const r = t.rows[i], cs = orderedCols(t).filter(c => !t.keyCols.includes(c.name)), cbs = cs.filter(c => c.type === 'checkbox');
   const anyG = cs.some(c => c.group), prog = h('span', { class: 'prog' }), fill = h('i', {});
   const upd = () => {
     const d = cbs.filter(c => val(t, r, c.name) === '1').length;
@@ -193,11 +261,13 @@ function cardEl(t, i, ti) {
   const body = cs.map(c => {
     const g = c.group || (anyG ? 'أخرى' : ''), head = g && g !== last ? h('h4', { class: 'grp' }, g) : null; last = g;
     const f = c.type === 'checkbox' ? h('label', { class: 'f chk' }, field(t, r, c, true), h('span', {}, c.name))
-      : h(c.type === 'number' ? 'div' : 'label', { class: 'f' }, h('span', {}, c.name), field(t, r, c, true));
+      : h(c.type === 'number' || c.type === 'time' || c.type === 'duration' ? 'div' : 'label', { class: 'f' }, h('span', {}, c.name), field(t, r, c, true));
     return [head, f];
   });
+  const note = h('textarea', { rows: 2, placeholder: 'ملاحظة لهذا اليوم…', value: S.notes.row[r] || '' });
+  let nt; note.addEventListener('input', () => { clearTimeout(nt); nt = setTimeout(() => setNote('row', t.id, r, note.value.trim()), 500); });
   const el = h('article', { class: 'card' + (i === ti ? ' today' : ''), onchange: upd }, h('h3', {}, h('span', {}, '📌 ' + r), cbs.length ? prog : null),
-    cbs.length ? h('div', { class: 'meter' }, fill) : null, body);
+    cbs.length ? h('div', { class: 'meter' }, fill) : null, body, h('label', { class: 'f' }, h('span', {}, '📝 ملاحظة اليوم'), note));
   upd(); return el;
 }
 function singleView(t, ti) {
@@ -219,7 +289,8 @@ function singleView(t, ti) {
 const allView = (t, ti) => h('div', { class: 'pane' }, h('div', { class: 'cards' }, t.rows.map((_, i) => cardEl(t, i, ti))));
 function scrollToday() {
   const el = $('.today');
-  if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+  if (!el || !el.scrollIntoView) return;
+  el.scrollIntoView({ behavior: 'smooth', block: el.tagName === 'ARTICLE' ? 'start' : 'center', inline: 'center' });
 }
 const viewMode = t => S.view || (t.columns.length > 8 ? 'card' : 'table');
 const hasDates = t => t.rows.some(r => /^\d{4}-\d{2}-\d{2}/.test(r));
@@ -238,7 +309,7 @@ function renderHome(bar, view) {
   if (!t) {
     bar.append(h('h1', {}, 'جداولي'), themeBtn());
     view.append(h('div', { class: 'empty' }, h('h2', {}, 'ابدأ من هنا'), h('p', {}, 'استورد جداولك السابقة من ملف نسخة احتياطية، أو أنشئ جدولاً جديداً.'),
-      h('div', { class: 'btns', style: 'flex-direction:column' }, h('button', { onclick: () => importFile() }, '⬆️ استيراد بياناتي'), h('a', { class: 'btn ghost', href: '#/edit' }, 'إنشاء جدول جديد'))));
+      h('div', { class: 'btns', style: 'flex-direction:column' }, h('button', { onclick: () => importFile() }, '⬆️ استيراد بياناتي'), h('a', { class: 'btn ghost', href: '#/library' }, '📚 اختيار من مكتبة القوالب'), h('a', { class: 'btn ghost', href: '#/edit' }, 'إنشاء جدول جديد'))));
     return;
   }
   const ti = todayIdx(t), mode = viewMode(t), now = new Date();
@@ -265,7 +336,7 @@ function streaks(f) {
 }
 function statsFor(t) {
   const ti = todayIdx(t), rows = t.rows.slice(0, ti >= 0 ? ti + 1 : t.rows.length);
-  const data = t.columns.filter(c => !t.keyCols.includes(c.name)), vals = c => rows.map(r => (S.data[r] || {})[c.name]);
+  const data = orderedCols(t).filter(c => !t.keyCols.includes(c.name)), vals = c => rows.map(r => (S.data[r] || {})[c.name]);
   const logged = rows.filter(r => data.some(c => { const v = (S.data[r] || {})[c.name]; return v && v !== '0'; })).length;
   const secs = new Map(), TN = { checkbox: 'المهام', number: 'الأرقام', duration: 'المدد', select: 'القوائم', text: 'الملاحظات' };
   const add = (c, row) => { const k = c.group || TN[c.type]; if (!secs.has(k)) secs.set(k, { title: k, rows: [], d: 0, n: 0 }); const s = secs.get(k); s.rows.push(row); return s; };
@@ -302,7 +373,7 @@ function renderStats(bar, view) {
 
 /* ---------- إدارة الجداول ---------- */
 function renderManage(bar, view) {
-  bar.append(h('h1', {}, 'الجداول'), h('a', { class: 'btn sm', href: '#/edit' }, '＋ جدول جديد'));
+  bar.append(h('h1', {}, 'الجداول'), h('a', { class: 'btn sm ghost', href: '#/library' }, '📚 القوالب'), h('a', { class: 'btn sm', href: '#/edit' }, '＋ جدول'));
   const tpls = S.tables.filter(t => t.isTemplate), real = S.tables.filter(t => !t.isTemplate), now = new Date();
   const srcs = [...newestFirst(real.slice()), ...tpls];
   const nextM = monthCovered(now.getFullYear(), now.getMonth() + 1) ? new Date(now.getFullYear(), now.getMonth() + 1, 1) : now;
@@ -344,15 +415,17 @@ function renderManage(bar, view) {
 function colRow(c, isKey) {
   const typ = h('select', { class: 'ctype', onchange: () => sync() }, Object.entries(TYPES).map(([k, l]) => h('option', { value: k, selected: k === c.type }, l)));
   const opts = h('input', { class: 'copts', placeholder: 'خيارات القائمة مفصولة بفاصلة', value: c.options || '' });
-  const grp = h('input', { class: 'cgrp', placeholder: 'المجموعة (اختياري، مثل: الصلوات)', value: c.group || '' });
-  grp.setAttribute('list', 'grp-list');
+  const badge = h('span', { class: 'gbadge' });
   function sync() { opts.hidden = typ.value !== 'select'; }
   sync();
-  return h('div', { class: 'crow', 'data-orig': c.name || '' }, h('span', { class: 'drag' }, '☰'),
+  const el = h('div', { class: 'crow', 'data-orig': c.name || '', 'data-grp': c.group || '' }, h('span', { class: 'drag' }, '☰'),
     h('input', { class: 'cname', placeholder: 'اسم العمود', value: c.name || '' }), typ,
-    h('input', { class: 'cw', type: 'number', placeholder: 'العرض', value: c.width || '' }),
+    h('input', { class: 'cw', type: 'number', placeholder: 'تلقائي', value: c.width || '' }),
     h('label', { class: 'kchk' }, h('input', { type: 'checkbox', class: 'ckey', checked: !!isKey }), 'مفتاحي'),
-    h('button', { class: 'x', title: 'حذف', onclick: e => e.currentTarget.closest('.crow').remove() }, '✕'), grp, opts);
+    h('button', { class: 'x', title: 'حذف', onclick: e => { const row = e.currentTarget.closest('.crow'), p = row.parentNode; row.remove(); p.dispatchEvent(new Event('colchange')); } }, '✕'), badge, opts);
+  el.refresh = () => { const g = el.dataset.grp; badge.textContent = g ? '🏷 ' + g : ''; badge.hidden = !g; };
+  el.refresh();
+  return el;
 }
 const rowItem = name => h('div', { class: 'rrow', 'data-orig': name || '' }, h('span', { class: 'drag' }, '☰'),
   h('input', { class: 'rname', placeholder: 'مفتاح السطر', value: name || '' }),
@@ -364,12 +437,57 @@ function renderEdit(bar, view, arg) {
   const title = h('input', { value: t.title, placeholder: 'عنوان الجدول', style: 'width:100%' });
   const tmpl = h('input', { type: 'checkbox', checked: t.isTemplate });
   const cols = h('div', {}, t.columns.map(c => colRow(c, t.keyCols.includes(c.name))));
-  const glist = h('datalist', { id: 'grp-list' }, [...new Set(S.tables.flatMap(x => x.columns.map(c => c.group)).filter(Boolean))].map(g => h('option', { value: g })));
   const rows = h('div', {}, t.rows.map(rowItem));
   const bulk = h('textarea', { rows: 3, placeholder: 'أضف عدة أسطر دفعة واحدة — سطر لكل مفتاح', style: 'width:100%' });
+  /* المجموعات: كل عمود يحمل اسم مجموعته في data-grp، والمجموعة الفارغة تُحفظ مؤقتاً في extra */
+  const extra = new Set(), gbox = h('div', {});
+  const colEls = () => $$('.crow', cols), gname = el => $('.cname', el).value.trim() || '(بدون اسم)';
+  const names = () => [...new Set([...colEls().map(e => e.dataset.grp).filter(Boolean), ...extra])];
+  const redraw = () => {
+    const ns = names();
+    gbox.replaceChildren(...(ns.length ? ns.map(g => h('div', { class: 'grow' },
+      h('input', { class: 'gname', value: g, onchange: e => rename(g, e.target.value.trim()) }),
+      h('span', { class: 'gcount' }, colEls().filter(x => x.dataset.grp === g).length + ' أعمدة'),
+      h('button', { class: 'btn sm ghost', type: 'button', onclick: () => choose(g) }, 'الأعمدة'),
+      h('button', { class: 'x', type: 'button', onclick: () => drop(g) }, '✕')))
+      : [h('p', { class: 'msg' }, 'لا توجد مجموعات. أنشئ مجموعة وسمّها وحدد الأعمدة التي تظهر معاً في البطاقات والجدول والإحصائيات.')]));
+    colEls().forEach(e => e.refresh());
+  };
+  const rename = (g, n) => {
+    if (!n || (n !== g && names().includes(n))) { toast(n ? 'اسم المجموعة مستخدم' : 'اسم المجموعة فارغ', true); return redraw(); }
+    colEls().forEach(e => { if (e.dataset.grp === g) e.dataset.grp = n; });
+    if (extra.delete(g)) extra.add(n);
+    redraw();
+  };
+  const drop = g => { colEls().forEach(e => { if (e.dataset.grp === g) e.dataset.grp = ''; }); extra.delete(g); redraw(); };
+  const choose = async g => {
+    const els = colEls();
+    const picked = await modal(close => {
+      const boxes = els.map(e => h('input', { type: 'checkbox', checked: e.dataset.grp === g }));
+      return [h('p', {}, `أعمدة مجموعة «${g}»`),
+        h('div', { class: 'pick' }, els.map((e, i) => h('label', {}, boxes[i], h('span', {}, gname(e) + (e.dataset.grp && e.dataset.grp !== g ? `  (في «${e.dataset.grp}»)` : ''))))),
+        h('div', { class: 'btns' }, h('button', { class: 'btn ghost', type: 'button', onclick: () => close(null) }, 'إلغاء'), h('button', { type: 'button', onclick: () => close(boxes.map(b => b.checked)) }, 'حفظ'))];
+    });
+    if (!picked) return;
+    els.forEach((e, i) => { if (picked[i]) e.dataset.grp = g; else if (e.dataset.grp === g) e.dataset.grp = ''; });
+    if (picked.some(Boolean)) extra.delete(g);
+    redraw();
+  };
+  const addGroup = async () => {
+    const n = await modal(close => {
+      const i = h('input', { class: 'plain', placeholder: 'مثل: الصلوات' });
+      setTimeout(() => i.focus(), 60);
+      i.addEventListener('keydown', e => { if (e.key === 'Enter') close(i.value.trim()); });
+      return [h('p', {}, 'اسم المجموعة الجديدة'), i, h('div', { class: 'btns' }, h('button', { class: 'btn ghost', type: 'button', onclick: () => close(null) }, 'إلغاء'), h('button', { type: 'button', onclick: () => close(i.value.trim()) }, 'متابعة'))];
+    });
+    if (!n) return;
+    if (names().includes(n)) return toast('اسم المجموعة مستخدم', true);
+    extra.add(n); redraw(); choose(n);
+  };
+  cols.addEventListener('colchange', redraw);
   const save = async () => {
     const name = title.value.trim();
-    const C = $$('.crow', cols).map(el => ({ name: $('.cname', el).value.trim(), type: $('.ctype', el).value, width: $('.cw', el).value.trim(), options: $('.copts', el).value.trim(), group: $('.cgrp', el).value.trim(), key: $('.ckey', el).checked, orig: el.dataset.orig })).filter(c => c.name);
+    const C = colEls().map(el => ({ name: $('.cname', el).value.trim(), type: $('.ctype', el).value, width: $('.cw', el).value.trim(), options: $('.copts', el).value.trim(), group: el.dataset.grp || '', key: $('.ckey', el).checked, orig: el.dataset.orig })).filter(c => c.name);
     const R = $$('.rrow', rows).map(el => ({ name: $('.rname', el).value.trim(), orig: el.dataset.orig })).filter(r => r.name);
     if (!name) return toast('أدخل عنواناً', true);
     if (taken(name, old && old.id)) return toast('العنوان مستخدم مسبقاً', true);
@@ -377,7 +495,7 @@ function renderEdit(bar, view, arg) {
     if (new Set(C.map(c => c.name)).size !== C.length) return toast('أسماء الأعمدة يجب ألا تتكرر', true);
     if (new Set(R.map(r => r.name)).size !== R.length) return toast('مفاتيح الأسطر يجب ألا تتكرر', true);
     const rec = { title: name, isTemplate: tmpl.checked, keyCols: C.filter(c => c.key).map(c => c.name), columns: C.map(({ name, type, width, options, group }) => ({ name, type, width, options, group })), rows: R.map(r => r.name) };
-    if (old) rec.id = old.id;
+    if (old) { rec.id = old.id; rec.uid = old.uid; }
     const id = await DB.putTable(rec);
     if (old) {
       const rm = new Map(R.filter(r => r.orig && r.orig !== r.name).map(r => [r.orig, r.name]));
@@ -390,16 +508,92 @@ function renderEdit(bar, view, arg) {
   bar.append(h('h1', {}, old ? 'تعديل الجدول' : 'جدول جديد'), h('button', { class: 'btn sm', onclick: save }, '💾 حفظ'));
   view.append(
     h('section', { class: 'sec' }, title, h('label', { class: 'kchk', style: 'margin-top:10px;font-size:14px' }, tmpl, 'حفظ كقالب (يُستخدم لتوليد جداول شهرية)')),
-    h('section', { class: 'sec' }, h('h2', {}, 'الأعمدة'), glist, cols, h('button', { class: 'btn ok sm', onclick: () => cols.append(colRow({ type: 'text' }, false)) }, '＋ عمود')),
+    h('section', { class: 'sec' }, h('h2', {}, 'الأعمدة'), cols, h('button', { class: 'btn ok sm', onclick: () => { cols.append(colRow({ type: 'text' }, false)); } }, '＋ عمود'),
+      h('p', { class: 'msg' }, 'العرض بالبكسل؛ اتركه فارغاً للضبط التلقائي. وفي عرض الجدول يمكنك سحب حافة العنوان لتغييره.')),
+    h('section', { class: 'sec' }, h('h2', {}, 'المجموعات'), gbox, h('button', { class: 'btn ok sm', onclick: addGroup }, '＋ مجموعة')),
     h('section', { class: 'sec' }, h('h2', {}, 'الأسطر'), rows,
       h('div', { class: 'btns' }, h('button', { class: 'btn ok', onclick: () => rows.append(rowItem('')) }, '＋ سطر')), bulk,
       h('div', { class: 'btns' }, h('button', { class: 'btn ghost', onclick: () => {
         const have = new Set($$('.rname', rows).map(i => i.value.trim()));
-        bulk.value.split('\n').map(s => s.trim()).filter(s => s && !have.has(s)).forEach(s => { have.add(s); rows.append(rowItem(s)); });
+        bulk.value.split('\n').map(x => x.trim()).filter(x => x && !have.has(x)).forEach(x => { have.add(x); rows.append(rowItem(x)); });
         bulk.value = '';
       } }, 'إضافة الأسطر المكتوبة'))),
-    h('p', { class: 'msg' }, 'عند إعادة تسمية سطر أو عمود موجود تنتقل بياناته معه تلقائياً.'));
+    h('p', { class: 'msg' }, 'عند إعادة تسمية سطر أو عمود موجود تنتقل بياناته وملاحظاته معه تلقائياً.'));
+  redraw();
   if (window.Sortable) { [cols, rows].forEach(el => new Sortable(el, { handle: '.drag', animation: 150 })); }
+}
+
+/* ---------- الملاحظات ---------- */
+async function renderNotes(bar, view) {
+  bar.append(h('h1', {}, 'الملاحظات'));
+  const tab = S.notesTab;
+  view.append(h('div', { class: 'seg' }, [['general', 'عامة'], ['table', 'الجدول الحالي']].map(([k, l]) => h('button', { class: tab === k ? 'on' : '', onclick: () => { S.notesTab = k; render('notes'); } }, l))));
+  const box = h('div', { style: 'margin-top:12px' });
+  view.append(box);
+  const auto = (ta, fn) => { let tm; ta.addEventListener('input', () => { clearTimeout(tm); tm = setTimeout(() => fn(ta.value.trim()), 500); }); return ta; };
+  if (tab === 'general') {
+    const list = (await DB.notes(0)).sort((a, b) => b.u - a.u);
+    const card = n => {
+      const ta = auto(h('textarea', { rows: 4, value: n.text, placeholder: 'اكتب ملاحظتك…', style: 'width:100%' }), v => { n.text = v; n.u = Date.now(); (v ? DB.putNote(n) : DB.delNote(n.k)).then(flash); });
+      const el = h('div', { class: 'note' }, ta, h('div', { class: 'nfoot' }, h('small', {}, ymd(new Date(n.u))),
+        h('button', { class: 'btn sm ghost', onclick: async () => { if (!await confirmBox('حذف هذه الملاحظة؟', 'حذف')) return; await DB.delNote(n.k); el.remove(); } }, 'حذف')));
+      return el;
+    };
+    const add = h('button', { class: 'btn ok', onclick: () => { const el = card({ k: 'g|' + DB.uid(), t: 0, kind: 'general', r: '', text: '', u: Date.now() }); add.after(el); $('textarea', el).focus(); } }, '＋ ملاحظة جديدة');
+    box.append(add, ...list.map(card));
+    if (!list.length) box.append(h('p', { class: 'msg' }, 'ملاحظات عامة لا علاقة لها بالجداول: أفكار، قوائم، تذكيرات…'));
+    return;
+  }
+  const t = S.cur;
+  if (!t) { box.append(empty('لا توجد جداول', 'أنشئ جدولاً أولاً.', 'إدارة الجداول', '#/manage')); return; }
+  bar.append(tableSelect());
+  const rn = t.rows.filter(r => S.notes.row[r]);
+  box.append(
+    h('section', { class: 'sec' }, h('h2', {}, '📌 ملاحظة هذا الجدول'),
+      auto(h('textarea', { rows: 4, value: S.notes.table, placeholder: 'ملاحظة عامة عن الجدول…', style: 'width:100%' }), v => setNote('table', t.id, '', v))),
+    h('section', { class: 'sec' }, h('h2', {}, '📝 ملاحظات الأيام'),
+      rn.length ? rn.map(r => h('div', { class: 'note' }, h('b', {}, shortLabel(r)), auto(h('textarea', { rows: 2, value: S.notes.row[r], style: 'width:100%' }), v => setNote('row', t.id, r, v))))
+        : h('p', { class: 'msg' }, 'لا توجد ملاحظات أيام بعد. أضف ملاحظة من البطاقة، أو بالضغط على اسم اليوم في عرض الجدول.')));
+}
+
+/* ---------- مكتبة القوالب ---------- */
+function renderLibrary(bar, view) {
+  bar.append(h('a', { class: 'ib', href: '#/manage' }, '›'), h('h1', {}, 'مكتبة القوالب'));
+  let cat = S.libCat || 'الكل';
+  const box = h('div', {});
+  const draw = () => {
+    const list = TEMPLATES.filter(x => cat === 'الكل' || x.cat === cat);
+    box.replaceChildren(
+      h('div', { class: 'chips2' }, ['الكل', ...TEMPLATE_CATS].map(c => h('button', { class: 'chip' + (c === cat ? ' on' : ''), onclick: () => { cat = S.libCat = c; draw(); } }, c))),
+      h('div', { class: 'tcards' }, list.map(x => h('button', { class: 'tcard', onclick: () => pickTemplate(x) }, h('h3', {}, x.title), h('p', {}, x.desc), h('p', {}, `${x.cat} — ${x.cols.length} عموداً`)))));
+  };
+  draw(); view.append(box);
+}
+async function pickTemplate(x) {
+  const now = new Date(), fld = (l, e) => h('div', {}, h('label', {}, l), e);
+  const res = await modal(close => {
+    const mon = h('select', {}, MONTHS.map((m, i) => h('option', { value: i + 1, selected: i === now.getMonth() }, m)));
+    const yr = h('input', { type: 'number', value: now.getFullYear(), min: 2000, max: 2100 });
+    const name = h('input', { class: 'plain', value: uniqueTitle(`${x.title} ${MONTHS[now.getMonth()]} ${now.getFullYear()}`) });
+    const upd = () => { if (!name.dataset.t) name.value = uniqueTitle(`${x.title} ${MONTHS[mon.value - 1]} ${yr.value}`); };
+    mon.addEventListener('change', upd); yr.addEventListener('input', upd); name.addEventListener('input', () => { name.dataset.t = '1'; });
+    return [h('p', {}, x.title), h('div', { class: 'grid' }, fld('الاسم', name), fld('الشهر', mon), fld('السنة', yr)),
+      h('div', { class: 'btns', style: 'flex-direction:column' },
+        h('button', { class: 'btn ok', onclick: () => close({ kind: 'table', name: name.value.trim(), m: +mon.value, y: +yr.value }) }, '🚀 إنشاء جدول لهذا الشهر'),
+        h('button', { class: 'btn ghost', onclick: () => close({ kind: 'tpl' }) }, '💾 حفظ كقالب فقط'),
+        h('button', { class: 'btn ghost', onclick: () => close(null) }, 'إلغاء'))];
+  });
+  if (!res) return;
+  const keys = [{ name: 'التاريخ', type: 'text', width: '', options: '', group: '' }, { name: 'اليوم', type: 'text', width: '', options: '', group: '' }];
+  const tp = { columns: [...keys, ...x.cols.map(c => ({ ...c }))], keyCols: ['التاريخ', 'اليوم'] };
+  if (res.kind === 'tpl') {
+    await DB.putTable({ title: uniqueTitle(x.title), columns: tp.columns, rows: [], keyCols: tp.keyCols, isTemplate: true });
+    await reload(); toast('تم حفظ القالب'); location.hash = '#/manage'; return;
+  }
+  if (!res.name || taken(res.name)) return toast('الاسم فارغ أو مستخدم مسبقاً', true);
+  if (!(res.y >= 2000 && res.y <= 2100)) return toast('السنة غير صحيحة', true);
+  const id = await generate(tp, res.name, res.m, res.y);
+  await reload(id); S.idx = Math.max(todayIdx(S.cur), 0); toast('تم إنشاء الجدول'); location.hash = '#/home';
 }
 
 /* ---------- القفل والإعدادات ---------- */
@@ -451,25 +645,50 @@ function toCsv(t) {
 }
 function validBackup(j) {
   return j && Array.isArray(j.tables) && Array.isArray(j.cells) && j.tables.every(t => Number.isInteger(t.id) && typeof t.title === 'string' && Array.isArray(t.columns) && t.columns.every(c => c && typeof c.name === 'string') && Array.isArray(t.rows) && Array.isArray(t.keyCols))
-    && j.cells.every(c => c && Number.isInteger(c.t) && typeof c.r === 'string' && typeof c.c === 'string');
+    && j.cells.every(c => c && Number.isInteger(c.t) && typeof c.r === 'string' && typeof c.c === 'string')
+    && (j.notes == null || (Array.isArray(j.notes) && j.notes.every(n => n && typeof n.k === 'string' && ['row', 'table', 'general'].includes(n.kind) && Number.isInteger(n.t) && typeof n.text === 'string')));
 }
 const choiceBox = (msg, opts) => modal(close => [h('p', {}, msg), h('div', { class: 'btns', style: 'flex-direction:column' },
   opts.map(([k, l]) => h('button', { class: k === 'replace' ? 'danger' : '', onclick: () => close(k) }, l)), h('button', { class: 'btn ghost', onclick: () => close(null) }, 'إلغاء'))]);
-const cleanTable = t => ({ id: t.id, title: String(t.title), isTemplate: !!t.isTemplate, keyCols: t.keyCols.map(String), rows: t.rows.map(String),
+const cleanTable = t => ({ id: t.id, uid: t.uid ? String(t.uid) : undefined, title: String(t.title), isTemplate: !!t.isTemplate, keyCols: t.keyCols.map(String), rows: t.rows.map(String),
   columns: t.columns.map(c => ({ name: String(c.name), type: TYPES[c.type] ? c.type : 'text', width: String(c.width || ''), options: String(c.options || ''), group: String(c.group || '') })) });
 async function doImport(f) {
   let j; try { j = JSON.parse(await f.text()); } catch (e) { return toast('الملف غير صالح', true); }
   if (!validBackup(j)) return toast('هذه ليست نسخة احتياطية صالحة', true);
   const mode = S.tables.length ? await choiceBox(`الملف يحتوي ${j.tables.length} جدولاً/قالباً.`, [['merge', 'إضافتها إلى الموجود'], ['replace', 'استبدال كل البيانات الحالية']]) : 'replace';
   if (!mode) return;
-  const tables = j.tables.map(cleanTable), cells = j.cells.filter(x => x.v !== '' && x.v != null).map(x => ({ t: x.t, r: x.r, c: x.c, v: String(x.v) }));
-  if (mode === 'replace') await DB.replaceAll(tables, cells);
+  const tables = j.tables.map(cleanTable), notes = (j.notes || []).filter(n => n.text !== '');
+  const cells = j.cells.filter(x => x.v !== '' && x.v != null).map(x => ({ t: x.t, r: x.r, c: x.c, v: String(x.v), u: x.u }));
+  if (mode === 'replace') await DB.replaceAll(tables, cells, notes);
   else {
     const ids = new Map();
-    for (const t of tables) { const { id, ...rec } = t, title = uniqueTitle(t.title), nid = await DB.putTable({ ...rec, title }); ids.set(id, nid); S.tables.push({ id: nid, title, columns: [], rows: [] }); }
+    for (const t of tables) { const { id, ...rec } = t, title = uniqueTitle(t.title), nid = await DB.putTable({ ...rec, uid: undefined, title }); ids.set(id, nid); S.tables.push({ id: nid, title, columns: [], rows: [] }); }
     await DB.putCells(cells.filter(x => ids.has(x.t)).map(x => ({ ...x, t: ids.get(x.t) })));
+    await DB.putNotes(notes.filter(n => n.t === 0 || ids.has(n.t)).map(n => { const t = n.t === 0 ? 0 : ids.get(n.t); return { ...n, t, k: n.kind === 'row' ? `r|${t}|${n.r}` : n.kind === 'table' ? `t|${t}` : n.k }; }));
   }
   await reload(); S.idx = Math.max(S.cur ? todayIdx(S.cur) : 0, 0); toast(`تم استيراد ${tables.length} جدولاً/قالباً`); render(S.route);
+}
+async function askCurrentPin() {
+  if (!S.meta.pin) return true;
+  const p = await pinBox('أدخل الرمز الحالي');
+  if (p == null) return false;
+  if (await checkPin(p)) return true;
+  toast('رمز غير صحيح', true); return false;
+}
+async function changePin() { if (!await askCurrentPin()) return; const p = await pinBox('الرمز الجديد', true); if (p) { await setPin(p); toast('تم تحديث الرمز'); render('settings'); } }
+async function removePin() { if (!await askCurrentPin()) return; S.meta.pin = null; await DB.setMeta('pin', null); toast('تم حذف الرمز'); render('settings'); }
+function exportModel(t) {
+  const cs = orderedCols(t).filter(c => !hidKey(t, c)), today = ymd(new Date());
+  return {
+    title: t.title, subtitle: `${t.rows.length} يوماً  •  ${today}`,
+    cols: cs.map(c => ({ name: c.name, type: c.type, group: c.group || '' })),
+    rows: t.rows.map(r => ({ label: shortLabel(r), today: r.includes(today), cells: cs.map(c => showVal(c, val(t, r, c.name))) }))
+  };
+}
+async function exportPdf() {
+  const t = S.cur; if (!t) return;
+  toast('جارٍ إنشاء الملف…');
+  try { await saveFile(`${t.title}.pdf`, 'application/pdf', await PDFX.make(exportModel(t))); } catch (e) { toast('تعذّر إنشاء PDF', true); }
 }
 function renderSettings(bar, view) {
   bar.append(h('h1', {}, 'الإعدادات'));
@@ -484,11 +703,16 @@ function renderSettings(bar, view) {
       [['auto', 'تلقائي'], ['light', 'فاتح'], ['dark', 'داكن']].map(([k, l]) => h('option', { value: k, selected: (S.meta.theme || 'auto') === k }, l))))),
     h('section', { class: 'sec' }, h('h2', {}, 'القفل'),
       row('شاشة التمويه', tog(S.meta.lock, async (on, el) => {
+        if (!on && S.meta.pin) {
+          const p = await pinBox('أدخل الرمز لإيقاف القفل');
+          if (p == null) return render('settings');
+          if (!(await checkPin(p))) { toast('رمز غير صحيح', true); return render('settings'); }
+        }
         await meta('lock', on);
         if (on && !S.meta.pin) { const p = await pinBox('اختر رمزاً من 4 أرقام أو أكثر (اختياري — بدونه تكفي الضغطات السرّية)', true); if (p) { await setPin(p); toast('تم تعيين الرمز'); } }
         render('settings');
       }), 'يظهر التطبيق كصفحة «Server is running». اضغط بالترتيب: Server ← OK ← running'),
-      S.meta.lock && row('رمز الدخول', h('button', { class: 'btn sm', onclick: async () => { const p = await pinBox('الرمز الجديد', true); if (p) { await setPin(p); toast('تم تحديث الرمز'); render('settings'); } } }, S.meta.pin ? 'تغيير' : 'تعيين')),
+      S.meta.lock ? row('رمز الدخول', h('div', { class: 'acts' }, h('button', { class: 'btn sm', onclick: changePin }, S.meta.pin ? 'تغيير' : 'تعيين'), S.meta.pin ? h('button', { class: 'btn sm danger', onclick: removePin }, 'حذف') : null)) : null,
       h('p', { class: 'msg' }, 'القفل يخفي الواجهة فقط، ولا يشفّر البيانات المخزّنة على الجهاز.')),
     h('section', { class: 'sec' }, h('h2', {}, 'تذكير يومي'),
       row('تفعيل التذكير', tog((S.meta.rem || {}).on, async (on, el) => {
@@ -501,10 +725,12 @@ function renderSettings(bar, view) {
       h('div', { class: 'btns', style: 'flex-direction:column' },
         h('button', { onclick: async () => saveFile(`jadawli-backup-${ymd(new Date())}.json`, 'application/json', JSON.stringify({ app: 'jadawli', v: 1, exported: new Date().toISOString(), ...await DB.exportAll() })) }, '⬇️ تصدير نسخة احتياطية (JSON)'),
         h('button', { class: 'btn ghost', onclick: () => importFile() }, '⬆️ استيراد نسخة احتياطية'),
-        h('button', { class: 'btn ghost', disabled: !S.cur, onclick: () => saveFile(`${S.cur.title}.csv`, 'text/csv', toCsv(S.cur)) }, '📄 تصدير الجدول الحالي (CSV)'))),
+        h('button', { class: 'btn ghost', disabled: !S.cur, onclick: () => saveFile(`${S.cur.title}.csv`, 'text/csv', toCsv(S.cur)) }, '📄 تصدير الجدول الحالي (CSV)'),
+        h('button', { class: 'btn ghost', disabled: !S.cur, onclick: () => exportPdf() }, '📑 تصدير الجدول الحالي (PDF — صفحة واحدة)'))),
     h('section', { class: 'sec' }, h('h2', {}, 'البيانات'),
       row('حذف كل البيانات', h('button', { class: 'danger sm', onclick: async () => {
-        if (!await confirmBox('سيتم حذف كل الجداول والبيانات من هذا الجهاز نهائياً. تأكد من وجود نسخة احتياطية.', 'حذف الكل')) return;
+        if (!await confirmBox('سيتم حذف كل الجداول والبيانات من هذا الجهاز نهائياً. تأكد من وجود نسخة احتياطية.', 'متابعة')) return;
+        if (!await challenge()) return;
         await DB.replaceAll([], []); await reload(); toast('تم حذف كل البيانات'); render('settings');
       } }, 'حذف'), 'لا يمكن التراجع')));
 }
@@ -513,6 +739,7 @@ function renderSettings(bar, view) {
 async function boot() {
   try { await DB.open(); } catch (e) { document.body.textContent = 'تعذّر فتح التخزين المحلي على هذا الجهاز'; return; }
   S.meta = await DB.meta(); S.view = S.meta.view || null;
+  if (!S.meta.dev) { S.meta.dev = DB.uid(); DB.setMeta('dev', S.meta.dev); }
   await reload(); S.idx = Math.max(S.cur ? todayIdx(S.cur) : 0, 0);
   applyTheme(); mq.addEventListener && mq.addEventListener('change', applyTheme);
   $('#imp').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; S.busy = false; if (f) doImport(f); });
@@ -522,6 +749,6 @@ async function boot() {
   route();
   if ('serviceWorker' in navigator && !native && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
-window.__app = { S, boot, render, statsFor, toCsv, validBackup, generate, todayIdx, doImport, makeMonth, monthCovered };
+window.__app = { S, boot, render, statsFor, toCsv, validBackup, generate, todayIdx, doImport, makeMonth, monthCovered, orderedCols, exportModel, setNote, challenge, removePin, changePin, setPin, checkPin };
 boot();
 })();
