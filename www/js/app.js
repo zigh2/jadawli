@@ -34,12 +34,23 @@ function h(tag, attrs, ...kids) {
 let tt, ft;
 function toast(msg, bad) { const t = $('#toast'); t.textContent = msg; t.className = 'show' + (bad ? ' bad' : ''); clearTimeout(tt); tt = setTimeout(() => { t.className = ''; }, 2800); }
 function flash() { const f = $('#saved'); f.classList.add('show'); clearTimeout(ft); ft = setTimeout(() => f.classList.remove('show'), 1100); }
+const mstack = [];   // النوافذ تتكدّس: فتح الساعة من داخل محرر المنبّه لا يُلغي المحرر
 function modal(build) {
   return new Promise(res => {
-    const m = $('#modal');
-    const close = v => { m.hidden = true; m.replaceChildren(); res(v); };
-    m.replaceChildren(h('div', { class: 'sheet' }, build(close)));
-    m.hidden = false;
+    const m = $('#modal'), sheet = h('div', { class: 'sheet' });
+    const close = v => {
+      const k = mstack.indexOf(entry); if (k >= 0) mstack.splice(k, 1);
+      sheet.remove();
+      const top = mstack[mstack.length - 1];
+      if (top) top.sheet.style.display = ''; else m.hidden = true;
+      S.mc = top ? top.cancel : null;
+      res(v);
+    };
+    const entry = { sheet, cancel: () => close(undefined) };
+    mstack.forEach(e => { e.sheet.style.display = 'none'; });
+    mstack.push(entry); S.mc = entry.cancel;
+    [build(close)].flat(Infinity).forEach(x => { if (x != null && x !== false) sheet.append(x.nodeType ? x : String(x)); });
+    m.append(sheet); m.hidden = false;
   });
 }
 window.App = { h, modal, toast };
@@ -95,10 +106,12 @@ async function reload(id) {
   S.data = S.cur ? await DB.cells(S.cur.id) : {};
   S.notes = S.cur ? await loadNotes(S.cur.id) : { row: {}, table: '' };
   if (S.cur) { S.meta.cur = S.cur.id; DB.setMeta('cur', S.cur.id); }
+  if (window.Alarms) Alarms.syncDone();
 }
 async function pick(id) { await reload(id); S.idx = Math.max(todayIdx(S.cur), 0); render(S.route); }
 function setCell(tid, r, c, v) {
   (S.data[r] = S.data[r] || {})[c] = v;
+  if (window.Alarms) Alarms.cellChanged(tid, r, c);
   DB.setCell(tid, r, c, v).then(flash, () => toast('تعذّر الحفظ', true));
 }
 function derive(r, name) {
@@ -159,8 +172,17 @@ const rowNoteBox = (t, r) => modal(close => {
 });
 
 /* ---------- الراوتر والهيكل ---------- */
-const routes = { home: renderHome, stats: renderStats, notes: renderNotes, manage: renderManage, library: renderLibrary, edit: renderEdit, settings: renderSettings };
-const TABS = [['home', '📊', 'الجدول'], ['stats', '📈', 'إحصائيات'], ['notes', '📝', 'ملاحظات'], ['manage', '🗂️', 'الجداول'], ['settings', '⚙️', 'الإعدادات']];
+const routes = { alarms: (b, v, a) => Alarms.render(b, v, a), home: renderHome, stats: renderStats, notes: renderNotes, manage: renderManage, library: renderLibrary, edit: renderEdit, settings: renderSettings };
+const ICONS = {
+  data: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9.5h18M3 14.5h18M9 4v16"/>',
+  stats: '<path d="M5 20V11M12 20V5M19 20v-6"/>',
+  alarms: '<circle cx="12" cy="13" r="7"/><path d="M12 9v4l3 2M5 4 3 6M19 4l2 2"/>',
+  notes: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 12h7M9 16h7"/>',
+  manage: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  settings: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>'
+};
+function svgIco(n) { const e = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); e.setAttribute('viewBox', '0 0 24 24'); e.setAttribute('class', 'ico'); e.innerHTML = ICONS[n]; return e; }
+const TABS = [['home', 'data', 'البيانات'], ['stats', 'stats', 'إحصائيات'], ['alarms', 'alarms', 'المنبهات'], ['notes', 'notes', 'ملاحظات'], ['manage', 'manage', 'الجداول'], ['settings', 'settings', 'الإعدادات']];
 function route() {
   const p = (location.hash || '#/home').slice(2).split('/');
   render(routes[p[0]] ? p[0] : 'home', p[1]);
@@ -171,13 +193,24 @@ function render(name, arg) {
   bar.replaceChildren(); view.replaceChildren();
   routes[name](bar, view, arg);
   const act = name === 'edit' || name === 'library' ? 'manage' : name;
-  $('#tabs').replaceChildren(...TABS.map(([k, ic, l]) => h('a', { href: '#/' + k, class: k === act ? 'on' : '' }, h('b', {}, ic), l)));
+  $('#tabs').replaceChildren(...TABS.map(([k, ic, l]) => h('a', { href: '#/' + k, class: k === act ? 'on' : '' }, h('b', {}, svgIco(ic)), l)));
 }
-const themeBtn = () => h('button', { class: 'ib', title: 'المظهر', onclick: () => { S.meta.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; DB.setMeta('theme', S.meta.theme); applyTheme(); } }, '🌓');
+const PALETTES = [
+  { id: 'blue', name: 'أزرق', pri: '#2563eb', priD: '#3b82f6', acc: '#10b981' },
+  { id: 'emerald', name: 'زمردي', pri: '#059669', priD: '#34d399', acc: '#f59e0b' },
+  { id: 'violet', name: 'بنفسجي', pri: '#7c3aed', priD: '#a78bfa', acc: '#10b981' },
+  { id: 'rose', name: 'وردي', pri: '#e11d48', priD: '#fb7185', acc: '#0ea5e9' },
+  { id: 'orange', name: 'برتقالي', pri: '#ea580c', priD: '#fb923c', acc: '#16a34a' },
+  { id: 'teal', name: 'تركوازي', pri: '#0d9488', priD: '#2dd4bf', acc: '#f59e0b' },
+  { id: 'slate', name: 'فحمي', pri: '#475569', priD: '#94a3b8', acc: '#22c55e' },
+  { id: 'brown', name: 'بني دافئ', pri: '#92400e', priD: '#d6a46a', acc: '#65a30d' }
+];
+const curPal = () => PALETTES.find(p => p.id === S.meta.palette) || PALETTES[0];
 const mq = window.matchMedia ? matchMedia('(prefers-color-scheme: dark)') : { matches: false, addEventListener() {} };
 function applyTheme() {
-  const m = S.meta.theme || 'auto', dark = m === 'dark' || (m === 'auto' && mq.matches);
+  const m = S.meta.theme || 'auto', dark = m === 'dark' || (m === 'auto' && mq.matches), p = curPal(), st = document.documentElement.style;
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  st.setProperty('--pri', dark ? p.priD : p.pri); st.setProperty('--ok', p.acc);
 }
 function tableSelect() {
   const real = S.tables.filter(t => !t.isTemplate);
@@ -221,34 +254,72 @@ function field(t, r, c, card) {
 const hidKey = (t, c) => t.keyCols.includes(c.name) && (c.name === 'التاريخ' || c.name === 'اليوم');
 const shortLabel = r => { const m = /^\d{4}-\d{2}-(\d{2}) \((.+)\)$/.exec(r); return m ? `${m[1]} ${m[2]}` : r; };
 const colStyle = c => { const w = c.width || (c.type === 'checkbox' ? '58' : ''); return w ? `width:${w}px;min-width:${w}px;max-width:${w}px` : ''; };
+const clampZ = z => Math.min(2, Math.max(0.5, Math.round(z * 100) / 100));
+let zt;
+function setZoom(tbl, label, z) {
+  S.zoom = clampZ(z); tbl.style.zoom = S.zoom; label.textContent = Math.round(S.zoom * 100) + '%';
+  clearTimeout(zt); zt = setTimeout(() => { S.meta.zoom = S.zoom; DB.setMeta('zoom', S.zoom); }, 400);
+}
+const widthBox = (c, cur) => modal(close => {
+  const i = h('input', { type: 'number', min: 40, max: 600, value: cur, class: 'plain' });
+  i.setAttribute('inputmode', 'numeric'); setTimeout(() => { i.focus(); i.select && i.select(); }, 60);
+  const go = () => { const v = i.value.trim(); if (v && !(+v >= 40 && +v <= 600)) return toast('أدخل عرضاً بين 40 و600', true); close(v); };
+  i.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  return [h('p', {}, `عرض العمود «${c.name}» بالبكسل`), i, h('p', { class: 'msg' }, 'اتركه فارغاً للضبط التلقائي بحسب المحتوى.'),
+    h('div', { class: 'btns' }, h('button', { class: 'btn ghost', onclick: () => close(null) }, 'إلغاء'), h('button', { onclick: go }, 'حفظ'))];
+});
+async function askWidth(t, c, th) {
+  const cur = c.width || String(Math.round(th.getBoundingClientRect().width / (S.zoom || 1)));
+  const v = await widthBox(c, cur);
+  if (v == null) return;
+  c.width = v; th.style.cssText = colStyle(c); DB.putTable(t).then(flash);
+}
 function startResize(e, t, c, th) {
   e.preventDefault(); e.stopPropagation();
-  const x0 = e.clientX, w0 = th.offsetWidth, tg = e.currentTarget; let w = w0;
+  const x0 = e.clientX, y0 = e.clientY, z = S.zoom || 1, w0 = th.getBoundingClientRect().width / z, tg = e.currentTarget; let w = w0, moved = false, done = false;
   if (tg.setPointerCapture) { try { tg.setPointerCapture(e.pointerId); } catch (x) {} }
-  const mv = ev => { w = Math.max(40, Math.min(420, Math.round(w0 + (x0 - ev.clientX)))); th.style.cssText = `width:${w}px;min-width:${w}px;max-width:${w}px`; };
-  const up = () => { tg.removeEventListener('pointermove', mv); tg.removeEventListener('pointerup', up); c.width = String(w); DB.putTable(t).then(flash); };
-  tg.addEventListener('pointermove', mv); tg.addEventListener('pointerup', up);
+  tg.classList.add('act');
+  const end = () => { done = true; clearTimeout(lp); tg.classList.remove('act'); tg.removeEventListener('pointermove', mv); tg.removeEventListener('pointerup', up); tg.removeEventListener('pointercancel', up); };
+  const lp = setTimeout(() => { if (!moved && !done) { end(); askWidth(t, c, th); } }, 600);   // ضغط مطول بلا حركة: إدخال رقم
+  const mv = ev => {
+    if (Math.hypot(ev.clientX - x0, ev.clientY - y0) > 6) { moved = true; clearTimeout(lp); }
+    if (moved) { w = Math.max(40, Math.min(600, Math.round(w0 + (x0 - ev.clientX) / z))); th.style.cssText = `width:${w}px;min-width:${w}px;max-width:${w}px`; }
+  };
+  const up = () => { const was = moved && !done; end(); if (was) { c.width = String(w); DB.putTable(t).then(flash); } };
+  tg.addEventListener('pointermove', mv); tg.addEventListener('pointerup', up); tg.addEventListener('pointercancel', up);
 }
 function tableView(t, ti) {
-  const cs = orderedCols(t).filter(c => !hidKey(t, c)), runs = [];
-  cs.forEach(c => { const g = c.group || '', l = runs[runs.length - 1]; if (l && l.g === g) l.n++; else runs.push({ g, n: 1 }); });
-  const anyG = runs.some(x => x.g);
+  const cs = orderedCols(t).filter(c => !hidKey(t, c));
   const head = c => {
     const th = h('th', { style: colStyle(c) }, c.name);
-    th.append(h('span', { class: 'rz', title: 'اسحب لتغيير العرض، وانقر مرتين للضبط التلقائي', onpointerdown: e => startResize(e, t, c, th), ondblclick: () => { c.width = ''; DB.putTable(t); render('home'); } }));
+    let lp, sx = 0, sy = 0;
+    th.addEventListener('pointerdown', e => { if (e.target.classList.contains('rz')) return; sx = e.clientX; sy = e.clientY; clearTimeout(lp); lp = setTimeout(() => askWidth(t, c, th), 600); });
+    th.addEventListener('pointermove', e => { if (Math.hypot(e.clientX - sx, e.clientY - sy) > 10) clearTimeout(lp); });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => th.addEventListener(ev, () => clearTimeout(lp)));
+    th.append(h('span', { class: 'rz', onpointerdown: e => startResize(e, t, c, th),
+      ondblclick: () => { c.width = ''; th.style.cssText = colStyle(c); DB.putTable(t).then(flash); } }));   // بلا إعادة رسم فلا يقفز الجدول
     return th;
   };
-  return h('div', { class: 'pane' }, h('table', {},
-    h('thead', { class: anyG ? 'hasg' : '' },
-      anyG ? h('tr', {}, h('th', {}), runs.map(x => h('th', { colspan: x.n, class: x.g ? 'gh' : 'gh0' }, x.g))) : null,
-      h('tr', {}, h('th', {}, '#'), cs.map(head))),
+  const tbl = h('table', {},
+    h('thead', {}, h('tr', {}, h('th', {}, '#'), cs.map(head))),
     h('tbody', {}, t.rows.map((r, i) => h('tr', { class: i === ti ? 'today' : '' },
       h('th', { scope: 'row', class: S.notes.row[r] ? 'hasnote' : '', title: 'ملاحظة اليوم', onclick: async e => {
         const th = e.currentTarget, v = await rowNoteBox(t, r);
         if (v == null) return;
         setNote('row', t.id, r, v); th.classList.toggle('hasnote', !!v);
       } }, shortLabel(r)),
-      cs.map(c => h('td', {}, field(t, r, c))))))));
+      cs.map(c => h('td', {}, field(t, r, c)))))));
+  tbl.style.zoom = S.zoom || 1;
+  const pane = h('div', { class: 'pane' }, tbl), zl = h('button', { class: 'zl', title: 'إعادة إلى 100%', onclick: () => setZoom(tbl, zl, 1) }, Math.round((S.zoom || 1) * 100) + '%');
+  /* قرص بإصبعين للتكبير والتصغير */
+  let d0 = 0, z0 = 1;
+  const dist = ts => Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY);
+  pane.addEventListener('touchstart', e => { if (e.touches.length === 2) { d0 = dist(e.touches); z0 = S.zoom || 1; } }, { passive: true });
+  pane.addEventListener('touchmove', e => { if (e.touches.length === 2 && d0) { e.preventDefault(); setZoom(tbl, zl, z0 * dist(e.touches) / d0); } }, { passive: false });
+  pane.addEventListener('touchend', e => { if (e.touches.length < 2) d0 = 0; }, { passive: true });
+  return h('div', { class: 'zwrap' }, pane, h('div', { class: 'zbar' },
+    h('button', { class: 'ib', onclick: () => setZoom(tbl, zl, (S.zoom || 1) - 0.1), title: 'تصغير' }, '−'), zl,
+    h('button', { class: 'ib', onclick: () => setZoom(tbl, zl, (S.zoom || 1) + 0.1), title: 'تكبير' }, '+')));
 }
 function cardEl(t, i, ti) {
   const r = t.rows[i], cs = orderedCols(t).filter(c => !t.keyCols.includes(c.name)), cbs = cs.filter(c => c.type === 'checkbox');
@@ -307,22 +378,22 @@ function importFile() { S.busy = true; setTimeout(() => { S.busy = false; }, 300
 function renderHome(bar, view) {
   const t = S.cur;
   if (!t) {
-    bar.append(h('h1', {}, 'جداولي'), themeBtn());
+    bar.append(h('h1', {}, 'جداولي'));
     view.append(h('div', { class: 'empty' }, h('h2', {}, 'ابدأ من هنا'), h('p', {}, 'استورد جداولك السابقة من ملف نسخة احتياطية، أو أنشئ جدولاً جديداً.'),
       h('div', { class: 'btns', style: 'flex-direction:column' }, h('button', { onclick: () => importFile() }, '⬆️ استيراد بياناتي'), h('a', { class: 'btn ghost', href: '#/library' }, '📚 اختيار من مكتبة القوالب'), h('a', { class: 'btn ghost', href: '#/edit' }, 'إنشاء جدول جديد'))));
     return;
   }
   const ti = todayIdx(t), mode = viewMode(t), now = new Date();
-  bar.append(tableSelect(), h('button', { class: 'ib txt', disabled: ti < 0, onclick: () => { S.idx = ti; if (mode === 'card') render('home'); else scrollToday(); } }, 'اليوم'), themeBtn());
+  bar.append(tableSelect(), ti >= 0 ? h('button', { class: 'ib txt', onclick: () => { S.idx = ti; if (mode === 'card') render('home'); else scrollToday(); } }, 'اليوم') : null,
+    h('select', { class: 'vsel', title: 'طريقة العرض', onchange: e => { S.view = e.target.value; DB.setMeta('view', S.view); render('home'); } },
+      [['table', 'جدول'], ['card', 'بطاقة'], ['all', 'كل البطاقات']].map(([k, l]) => h('option', { value: k, selected: mode === k }, l))));
   const src = newestFirst(S.tables.filter(x => !x.isTemplate && hasDates(x)))[0];
   const banner = src && !monthCovered(now.getFullYear(), now.getMonth() + 1)
     ? h('div', { class: 'banner' }, h('span', {}, `لا يوجد جدول لشهر ${MONTHS[now.getMonth()]}.`),
       h('button', { class: 'btn ok sm', onclick: async () => { await makeMonth(src, now.getMonth() + 1, now.getFullYear()); toast('تم توليد جدول الشهر'); render('home'); } }, `ولّده بنفس بنية «${src.title}»`)) : null;
-  const seg = h('div', { class: 'seg' }, [['table', 'جدول'], ['card', 'بطاقة'], ['all', 'كل البطاقات']].map(([k, l]) =>
-    h('button', { class: mode === k ? 'on' : '', onclick: () => { S.view = k; DB.setMeta('view', k); render('home'); } }, l)));
   const body = !t.rows.length ? empty('لا توجد أسطر في هذا الجدول', 'أضف أسطراً من شاشة التعديل.', 'تعديل الجدول', '#/edit/' + t.id)
     : mode === 'table' ? tableView(t, ti) : mode === 'card' ? singleView(t, ti) : allView(t, ti);
-  view.append(h('div', { class: 'col' }, banner, seg, body));
+  view.append(h('div', { class: 'col' }, banner, body));
   if (mode !== 'card') setTimeout(scrollToday, 150);
 }
 
@@ -418,12 +489,10 @@ function colRow(c, isKey) {
   const badge = h('span', { class: 'gbadge' });
   function sync() { opts.hidden = typ.value !== 'select'; }
   sync();
-  const el = h('div', { class: 'crow', 'data-orig': c.name || '', 'data-grp': c.group || '' }, h('span', { class: 'drag' }, '☰'),
+  const el = h('div', { class: 'crow', 'data-orig': c.name || '', 'data-grp': c.group || '', 'data-width': c.width || '', 'data-key': isKey ? '1' : '' }, h('span', { class: 'drag' }, '☰'),
     h('input', { class: 'cname', placeholder: 'اسم العمود', value: c.name || '' }), typ,
-    h('input', { class: 'cw', type: 'number', placeholder: 'تلقائي', value: c.width || '' }),
-    h('label', { class: 'kchk' }, h('input', { type: 'checkbox', class: 'ckey', checked: !!isKey }), 'مفتاحي'),
     h('button', { class: 'x', title: 'حذف', onclick: e => { const row = e.currentTarget.closest('.crow'), p = row.parentNode; row.remove(); p.dispatchEvent(new Event('colchange')); } }, '✕'), badge, opts);
-  el.refresh = () => { const g = el.dataset.grp; badge.textContent = g ? '🏷 ' + g : ''; badge.hidden = !g; };
+  el.refresh = () => { const g = el.dataset.grp, k = el.dataset.key === '1'; badge.textContent = [g ? '🏷 ' + g : '', k ? '🔑 مفتاحي' : ''].filter(Boolean).join('   '); badge.hidden = !g && !k; };
   el.refresh();
   return el;
 }
@@ -484,10 +553,24 @@ function renderEdit(bar, view, arg) {
     if (names().includes(n)) return toast('اسم المجموعة مستخدم', true);
     extra.add(n); redraw(); choose(n);
   };
-  cols.addEventListener('colchange', redraw);
+  const kbox = h('p', { class: 'msg' });
+  const kdraw = () => { const ks = colEls().filter(e => e.dataset.key === '1').map(gname); kbox.textContent = ks.length ? 'المفتاحية: ' + ks.join('، ') : 'لا توجد أعمدة مفتاحية.'; colEls().forEach(e => e.refresh()); };
+  const chooseKeys = async () => {
+    const els = colEls();
+    const picked = await modal(close => {
+      const boxes = els.map(e => h('input', { type: 'checkbox', checked: e.dataset.key === '1' }));
+      return [h('p', {}, 'حدّد الأعمدة المفتاحية'), h('p', { class: 'msg' }, 'أعمدة تُملأ تلقائياً من اسم اليوم (مثل التاريخ واليوم)، فلا تُكتب يدوياً.'),
+        h('div', { class: 'pick' }, els.map((e, i) => h('label', {}, boxes[i], h('span', {}, gname(e))))),
+        h('div', { class: 'btns' }, h('button', { class: 'btn ghost', type: 'button', onclick: () => close(null) }, 'إلغاء'), h('button', { type: 'button', onclick: () => close(boxes.map(b => b.checked)) }, 'حفظ'))];
+    });
+    if (!picked) return;
+    els.forEach((e, i) => { e.dataset.key = picked[i] ? '1' : ''; });
+    kdraw();
+  };
+  cols.addEventListener('colchange', () => { redraw(); kdraw(); });
   const save = async () => {
     const name = title.value.trim();
-    const C = colEls().map(el => ({ name: $('.cname', el).value.trim(), type: $('.ctype', el).value, width: $('.cw', el).value.trim(), options: $('.copts', el).value.trim(), group: el.dataset.grp || '', key: $('.ckey', el).checked, orig: el.dataset.orig })).filter(c => c.name);
+    const C = colEls().map(el => ({ name: $('.cname', el).value.trim(), type: $('.ctype', el).value, width: el.dataset.width || '', options: $('.copts', el).value.trim(), group: el.dataset.grp || '', key: el.dataset.key === '1', orig: el.dataset.orig })).filter(c => c.name);
     const R = $$('.rrow', rows).map(el => ({ name: $('.rname', el).value.trim(), orig: el.dataset.orig })).filter(r => r.name);
     if (!name) return toast('أدخل عنواناً', true);
     if (taken(name, old && old.id)) return toast('العنوان مستخدم مسبقاً', true);
@@ -508,8 +591,8 @@ function renderEdit(bar, view, arg) {
   bar.append(h('h1', {}, old ? 'تعديل الجدول' : 'جدول جديد'), h('button', { class: 'btn sm', onclick: save }, '💾 حفظ'));
   view.append(
     h('section', { class: 'sec' }, title, h('label', { class: 'kchk', style: 'margin-top:10px;font-size:14px' }, tmpl, 'حفظ كقالب (يُستخدم لتوليد جداول شهرية)')),
-    h('section', { class: 'sec' }, h('h2', {}, 'الأعمدة'), cols, h('button', { class: 'btn ok sm', onclick: () => { cols.append(colRow({ type: 'text' }, false)); } }, '＋ عمود'),
-      h('p', { class: 'msg' }, 'العرض بالبكسل؛ اتركه فارغاً للضبط التلقائي. وفي عرض الجدول يمكنك سحب حافة العنوان لتغييره.')),
+    h('section', { class: 'sec' }, h('h2', {}, 'الأعمدة'), cols, h('button', { class: 'btn ok sm', onclick: () => { cols.append(colRow({ type: 'text' }, false)); kdraw(); } }, '＋ عمود')),
+    h('section', { class: 'sec' }, h('h2', {}, 'الأعمدة المفتاحية'), kbox, h('button', { class: 'btn ok sm', onclick: chooseKeys }, 'تحديد الأعمدة')),
     h('section', { class: 'sec' }, h('h2', {}, 'المجموعات'), gbox, h('button', { class: 'btn ok sm', onclick: addGroup }, '＋ مجموعة')),
     h('section', { class: 'sec' }, h('h2', {}, 'الأسطر'), rows,
       h('div', { class: 'btns' }, h('button', { class: 'btn ok', onclick: () => rows.append(rowItem('')) }, '＋ سطر')), bulk,
@@ -519,7 +602,7 @@ function renderEdit(bar, view, arg) {
         bulk.value = '';
       } }, 'إضافة الأسطر المكتوبة'))),
     h('p', { class: 'msg' }, 'عند إعادة تسمية سطر أو عمود موجود تنتقل بياناته وملاحظاته معه تلقائياً.'));
-  redraw();
+  redraw(); kdraw();
   if (window.Sortable) { [cols, rows].forEach(el => new Sortable(el, { handle: '.drag', animation: 150 })); }
 }
 
@@ -614,28 +697,9 @@ async function unlockFlow() {
   if (await checkPin(p)) unlock(); else toast('رمز غير صحيح', true);
 }
 function showLock() {
-  const L = $('#lock'); let seq = []; const goal = ['w1', 'w2', 'w3'];
-  const word = (id, txt) => h('span', { class: 'sw', onpointerdown: e => {
-    e.stopPropagation(); seq.push(id);
-    if (seq.some((x, i) => x !== goal[i])) { seq = []; return; }
-    if (seq.length === 3) { seq = []; setTimeout(unlockFlow, 100); }
-  } }, txt);
-  L.replaceChildren(h('p', {}, word('w2', 'OK'), ' - ', word('w1', 'Server'), ' is ', word('w3', 'running'), '.'));
-  L.onpointerdown = () => { seq = []; };
+  const L = $('#lock');
+  Alarms.mountDisguise(L, unlockFlow);   // يظهر التطبيق كتطبيق منبّه؛ الضغط المطول على الساعة يفتح الجداول
   L.hidden = false; $('#app').hidden = true;
-}
-async function applyReminder() {
-  const LN = plug('LocalNotifications'), r = S.meta.rem || {};
-  if (!native || !LN) return r.on ? 'unsupported' : 'ok';
-  try {
-    await LN.cancel({ notifications: [{ id: 1 }] });
-    if (!r.on) return 'ok';
-    const p = await LN.requestPermissions();
-    if (p.display !== 'granted') return 'denied';
-    const [hh, mm] = (r.time || '21:00').split(':').map(Number);
-    await LN.schedule({ notifications: [{ id: 1, title: 'جداولي', body: 'هل سجّلت يوميتك اليوم؟', schedule: { on: { hour: hh, minute: mm }, allowWhileIdle: true } }] });
-    return 'ok';
-  } catch (e) { return 'error'; }
 }
 function toCsv(t) {
   const q = s => `"${String(s).replace(/"/g, '""')}"`;
@@ -680,7 +744,7 @@ async function removePin() { if (!await askCurrentPin()) return; S.meta.pin = nu
 function exportModel(t) {
   const cs = orderedCols(t).filter(c => !hidKey(t, c)), today = ymd(new Date());
   return {
-    title: t.title, subtitle: `${t.rows.length} يوماً  •  ${today}`,
+    title: t.title, subtitle: `${t.rows.length} يوماً  •  ${today}`, pri: curPal().pri,
     cols: cs.map(c => ({ name: c.name, type: c.type, group: c.group || '' })),
     rows: t.rows.map(r => ({ label: shortLabel(r), today: r.includes(today), cells: cs.map(c => showVal(c, val(t, r, c.name))) }))
   };
@@ -693,14 +757,18 @@ async function exportPdf() {
 function renderSettings(bar, view) {
   bar.append(h('h1', {}, 'الإعدادات'));
   const row = (label, ctl, sub) => h('div', { class: 'srow' }, h('div', {}, h('b', {}, label), sub && h('small', {}, sub)), ctl);
-  const tog = (on, fn) => h('input', { type: 'checkbox', class: 'toggle', checked: !!on, onchange: e => fn(e.target.checked, e.target) });
+  const tog = (on, fn) => h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: !!on, onchange: e => fn(e.target.checked, e.target) }), h('span', { class: 'slider' }));
   const meta = (k, v) => { S.meta[k] = v; return DB.setMeta(k, v); };
-  const timeIn = h('input', { type: 'time', value: (S.meta.rem || {}).time || '21:00', onchange: async e => {
-    await meta('rem', { ...(S.meta.rem || {}), time: e.target.value }); if ((S.meta.rem || {}).on) applyReminder();
-  } });
   view.append(
-    h('section', { class: 'sec' }, h('h2', {}, 'المظهر'), row('وضع الألوان', h('select', { onchange: async e => { await meta('theme', e.target.value); applyTheme(); } },
-      [['auto', 'تلقائي'], ['light', 'فاتح'], ['dark', 'داكن']].map(([k, l]) => h('option', { value: k, selected: (S.meta.theme || 'auto') === k }, l))))),
+    h('section', { class: 'sec' }, h('h2', {}, 'المظهر'),
+      row('وضع الإضاءة', h('select', { onchange: async e => { await meta('theme', e.target.value); applyTheme(); } },
+        [['auto', 'تلقائي'], ['light', 'فاتح'], ['dark', 'داكن']].map(([k, l]) => h('option', { value: k, selected: (S.meta.theme || 'auto') === k }, l)))),
+      h('div', { class: 'srow', style: 'flex-direction:column;align-items:stretch' }, h('div', {}, h('b', {}, 'مجموعة الألوان'), h('small', {}, 'تُطبَّق على الأزرار والإطارات والتدرجات والعناوين')),
+        h('div', { class: 'swatches' }, PALETTES.map(p => h('button', { class: 'swatch' + (curPal().id === p.id ? ' on' : ''), title: p.name, style: `background:linear-gradient(135deg,${p.pri} 50%,${p.acc} 50%)`,
+          onclick: async () => { await meta('palette', p.id); applyTheme(); render('settings'); } })))),
+      row('العرض الافتراضي للبيانات', h('select', { onchange: async e => { S.view = e.target.value === 'auto' ? null : e.target.value; await meta('view', S.view); } },
+        [['auto', 'تلقائي (بحسب عدد الأعمدة)'], ['table', 'جدول'], ['card', 'بطاقة'], ['all', 'كل البطاقات']].map(([k, l]) => h('option', { value: k, selected: (S.view || 'auto') === k }, l)))),
+      row('الجولة التعريفية', h('button', { class: 'btn sm ghost', onclick: () => showTour() }, 'عرض'))),
     h('section', { class: 'sec' }, h('h2', {}, 'القفل'),
       row('شاشة التمويه', tog(S.meta.lock, async (on, el) => {
         if (!on && S.meta.pin) {
@@ -711,16 +779,10 @@ function renderSettings(bar, view) {
         await meta('lock', on);
         if (on && !S.meta.pin) { const p = await pinBox('اختر رمزاً من 4 أرقام أو أكثر (اختياري — بدونه تكفي الضغطات السرّية)', true); if (p) { await setPin(p); toast('تم تعيين الرمز'); } }
         render('settings');
-      }), 'يظهر التطبيق كصفحة «Server is running». اضغط بالترتيب: Server ← OK ← running'),
+      }), 'يظهر التطبيق كتطبيق منبّه. اضغط مطولاً على أيقونة الساعة في أعلى الصفحة لفتح الجداول.'),
       S.meta.lock ? row('رمز الدخول', h('div', { class: 'acts' }, h('button', { class: 'btn sm', onclick: changePin }, S.meta.pin ? 'تغيير' : 'تعيين'), S.meta.pin ? h('button', { class: 'btn sm danger', onclick: removePin }, 'حذف') : null)) : null,
       h('p', { class: 'msg' }, 'القفل يخفي الواجهة فقط، ولا يشفّر البيانات المخزّنة على الجهاز.')),
-    h('section', { class: 'sec' }, h('h2', {}, 'تذكير يومي'),
-      row('تفعيل التذكير', tog((S.meta.rem || {}).on, async (on, el) => {
-        await meta('rem', { ...(S.meta.rem || {}), on });
-        const r = await applyReminder();
-        if (r === 'ok') toast(on ? 'تم ضبط التذكير' : 'تم إيقاف التذكير');
-        else { await meta('rem', { ...(S.meta.rem || {}), on: false }); el.checked = false; toast(r === 'denied' ? 'لم يُسمح بالإشعارات' : r === 'unsupported' ? 'التذكير متاح داخل تطبيق الأندرويد فقط' : 'تعذّر ضبط التذكير', true); }
-      })), row('الوقت', timeIn)),
+    Alarms.settings({ row, tog, meta }),
     h('section', { class: 'sec' }, h('h2', {}, 'النسخ الاحتياطي والتصدير'),
       h('div', { class: 'btns', style: 'flex-direction:column' },
         h('button', { onclick: async () => saveFile(`jadawli-backup-${ymd(new Date())}.json`, 'application/json', JSON.stringify({ app: 'jadawli', v: 1, exported: new Date().toISOString(), ...await DB.exportAll() })) }, '⬇️ تصدير نسخة احتياطية (JSON)'),
@@ -735,10 +797,47 @@ function renderSettings(bar, view) {
       } }, 'حذف'), 'لا يمكن التراجع')));
 }
 
+/* ---------- الجولة التعريفية وزر الرجوع ---------- */
+const TOUR = [
+  ['مرحباً بك في جداولي', 'تطبيق لتسجيل يومياتك في جداول، يعمل بدون إنترنت وبياناتك على جهازك. هذه جولة سريعة لأهم الأمور.'],
+  ['طرق عرض البيانات', 'من القائمة في أعلى صفحة «البيانات» اختر العرض: جدول، أو بطاقة اليوم، أو كل البطاقات. ويمكنك تحديد العرض الافتراضي من الإعدادات.'],
+  ['تكبير الجدول وتصغيره', 'في عرض الجدول اقرص بإصبعين للتكبير والتصغير، أو استعمل الزرين + و − أسفل الجدول (من نصف الحجم إلى الضعف).'],
+  ['عرض الأعمدة', 'اسحب حافة عنوان أي عمود لتغيير عرضه. وللعمود الأخير أو لتحديد رقم دقيق اضغط مطولاً على عنوان العمود وأدخل العرض.'],
+  ['ملاحظات الأيام', 'اضغط على اسم اليوم في الجدول لكتابة ملاحظة له، أو اكتبها في أسفل البطاقة. وتجد كل ملاحظاتك في تبويب «ملاحظات».'],
+  ['الجداول والقوالب', 'من «الجداول» أنشئ جدولاً أو اختر من مكتبة القوالب الجاهزة، وولّد جدول الشهر الجديد بضغطة واحدة من اللافتة التي تظهر.'],
+  ['المجموعات', 'في تعديل الجدول اجمع الأعمدة المتقاربة في مجموعة وسمّها، فتظهر معاً في البطاقات والإحصائيات.'],
+  ['المنبهات', 'أضف منبهات بعناوين، واربط أي منبه بعمود ليذكّرك ويعدّ الوقت قبل الموعد وبعده حتى تسجّل القيمة.'],
+  ['النسخ الاحتياطي', 'من الإعدادات صدّر نسخة احتياطية بانتظام، فهي سبيلك لاستعادة بياناتك عند تغيير الهاتف أو حذف التطبيق.']
+];
+function showTour() {
+  let i = 0;
+  modal(close => {
+    const t = h('b', { class: 'tt' }), p = h('p', {}), dots = h('div', { class: 'dots' }), nx = h('button', {}, ''), pv = h('button', { class: 'btn ghost' }, 'السابق');
+    const draw = () => {
+      t.textContent = TOUR[i][0]; p.textContent = TOUR[i][1]; pv.hidden = i === 0; nx.textContent = i === TOUR.length - 1 ? 'ابدأ' : 'التالي';
+      dots.replaceChildren(...TOUR.map((_, k) => h('i', { class: k === i ? 'on' : '' })));
+    };
+    nx.onclick = () => { if (i === TOUR.length - 1) close(true); else { i++; draw(); } };
+    pv.onclick = () => { i--; draw(); };
+    draw();
+    return [t, p, dots, h('div', { class: 'btns' }, h('button', { class: 'btn ghost', onclick: () => close(true) }, 'تخطّي'), pv, nx)];
+  }).then(() => { S.meta.tour = 1; DB.setMeta('tour', 1); });
+}
+function onBack() {
+  const AP = plug('App'), m = $('#modal');
+  if (!m.hidden) { if (S.mc) S.mc(); else { m.hidden = true; m.replaceChildren(); } return; }
+  const al = $('#alert'); if (al && !al.hidden) return;
+  if (!$('#lock').hidden) { (AP.minimizeApp || AP.exitApp).call(AP); return; }
+  const up = { edit: 'manage', library: 'manage' }[S.route];
+  if (up) { location.hash = '#/' + up; return; }
+  if (S.route !== 'home') { location.hash = '#/home'; return; }
+  AP.exitApp();
+}
+
 /* ---------- الإقلاع ---------- */
 async function boot() {
   try { await DB.open(); } catch (e) { document.body.textContent = 'تعذّر فتح التخزين المحلي على هذا الجهاز'; return; }
-  S.meta = await DB.meta(); S.view = S.meta.view || null;
+  S.meta = await DB.meta(); S.view = S.meta.view || null; S.zoom = clampZ(S.meta.zoom || 1);
   if (!S.meta.dev) { S.meta.dev = DB.uid(); DB.setMeta('dev', S.meta.dev); }
   await reload(); S.idx = Math.max(S.cur ? todayIdx(S.cur) : 0, 0);
   applyTheme(); mq.addEventListener && mq.addEventListener('change', applyTheme);
@@ -747,8 +846,14 @@ async function boot() {
   document.addEventListener('visibilitychange', () => { if (document.hidden && S.meta.lock && !S.busy) showLock(); });
   if (S.meta.lock) showLock();
   route();
+  const AP = plug('App'); if (native && AP && AP.addListener) AP.addListener('backButton', onBack);
+  Alarms.sync(); Alarms.checkLaunch();
+  window.addEventListener('alarmLaunch', () => Alarms.checkLaunch());
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) Alarms.checkLaunch(); });
+  if (!S.meta.tour && !S.meta.lock) setTimeout(showTour, 700);
   if ('serviceWorker' in navigator && !native && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
-window.__app = { S, boot, render, statsFor, toCsv, validBackup, generate, todayIdx, doImport, makeMonth, monthCovered, orderedCols, exportModel, setNote, challenge, removePin, changePin, setPin, checkPin };
+Object.assign(window.App, { S, DB, ymd, DAYS, MONTHS, native, plug, reload, field, orderedCols, baseName });
+window.__app = { PALETTES, applyTheme, showTour, onBack, setZoom, clampZ, S, boot, render, statsFor, toCsv, validBackup, generate, todayIdx, doImport, makeMonth, monthCovered, orderedCols, exportModel, setNote, challenge, removePin, changePin, setPin, checkPin };
 boot();
 })();

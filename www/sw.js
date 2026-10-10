@@ -1,5 +1,5 @@
-const C = 'jadawli-v2';
-const FILES = ['./', 'index.html', 'manifest.webmanifest', 'css/fonts.css', 'css/app.css', 'js/sortable.min.js', 'js/db.js', 'js/templates.js', 'js/app.js', 'js/clock.js', 'js/pdf.js', 'js/vendor/pdf-lib.min.js', 'js/vendor/fontkit.umd.min.js',
+const C = 'jadawli-v3';
+const FILES = ['./', 'index.html', 'manifest.webmanifest', 'css/fonts.css', 'css/app.css', 'js/sortable.min.js', 'js/db.js', 'js/templates.js', 'js/app.js', 'js/clock.js', 'js/alarms.js', 'js/pdf.js', 'js/vendor/pdf-lib.min.js', 'js/vendor/fontkit.umd.min.js',
   ...['arabic-400', 'arabic-700', 'latin-400', 'latin-700'].map(n => `fonts/pdf/tajawal-${n}-normal.woff`),
   'icons/icon-192.png', 'icons/icon-512.png',
   ...['arabic', 'latin'].flatMap(s => [400, 500, 700].map(w => `fonts/tajawal-${s}-${w}-normal.woff2`))];

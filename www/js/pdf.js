@@ -69,7 +69,8 @@ async function build(libs, bytes, model, opt = {}) {
   let [W, H] = SIZES[opt.size || 'A3'], s = fit(W, H);
   if (!opt.size && s < 5.5) { [W, H] = SIZES.A2; s = fit(W, H); }
 
-  const C = { pri: rgb(.145, .388, .922), dark: rgb(.118, .227, .541), line: rgb(.8, .835, .88), alt: rgb(.973, .98, .988), today: rgb(.82, .98, .9), ok: rgb(.063, .725, .506), txt: rgb(.12, .16, .22), mute: rgb(.4, .45, .55), white: rgb(1, 1, 1) };
+  const hx = (v, k = 1) => { const n = parseInt(String(v).slice(1), 16); return rgb(((n >> 16) & 255) / 255 * k, ((n >> 8) & 255) / 255 * k, (n & 255) / 255 * k); };
+  const C = { pri: model.pri ? hx(model.pri) : rgb(.145, .388, .922), dark: model.pri ? hx(model.pri, .62) : rgb(.118, .227, .541), line: rgb(.8, .835, .88), alt: rgb(.973, .98, .988), today: rgb(.82, .98, .9), ok: rgb(.063, .725, .506), txt: rgb(.12, .16, .22), mute: rgb(.4, .45, .55), white: rgb(1, 1, 1) };
   const pg = doc.addPage([W, H]);
   const right = W - M, wL = (uL + PAD) * s, cw = u.map(x => (x + PAD) * s), rh = rowU * s, hh = hdrU * s, gh = gU * s;
   draw(pg, model.title, right, H - M - 16, 16, true, C.pri);
