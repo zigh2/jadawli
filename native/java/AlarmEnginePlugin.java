@@ -6,6 +6,8 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.media.AudioManager;
+import android.os.PowerManager;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
@@ -104,7 +106,36 @@ public class AlarmEnginePlugin extends Plugin {
         JSObject o = new JSObject();
         o.put("notif", nm != null && nm.areNotificationsEnabled());
         o.put("fsi", Build.VERSION.SDK_INT < 34 || (nm != null && nm.canUseFullScreenIntent()));
+        try {
+            AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+            int max = am.getStreamMaxVolume(AudioManager.STREAM_ALARM), cur = am.getStreamVolume(AudioManager.STREAM_ALARM);
+            o.put("alarmVol", max == 0 ? 0 : (int) Math.round(cur * 100.0 / max));
+        } catch (Exception e) { o.put("alarmVol", -1); }
+        try {
+            PowerManager pm = (PowerManager) c.getSystemService(Context.POWER_SERVICE);
+            o.put("battery", pm.isIgnoringBatteryOptimizations(c.getPackageName()));
+        } catch (Exception e) { o.put("battery", true); }
         call.resolve(o);
+    }
+
+    /** يوقف الصوت فقط (عند فتح شاشة التنبيه) ويُبقي الإشعار. */
+    @PluginMethod
+    public void silence(PluginCall call) {
+        AlarmEngine.stopRing(getContext());
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void getLog(PluginCall call) {
+        JSObject o = new JSObject();
+        o.put("log", AlarmEngine.sp(getContext()).getString("log", ""));
+        call.resolve(o);
+    }
+
+    @PluginMethod
+    public void clearLog(PluginCall call) {
+        AlarmEngine.sp(getContext()).edit().remove("log").apply();
+        call.resolve();
     }
 
     @PluginMethod
