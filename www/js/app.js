@@ -4,12 +4,20 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const DAYS = ['أحد', 'إثنين', 'ثلاثاء', 'أربعاء', 'خميس', 'جمعة', 'سبت'];
 const MONTHS = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
-const TYPES = { text: 'نص', checkbox: 'صح/خطأ', select: 'قائمة', number: 'رقم', duration: 'مدة (h:mm)', date: 'تاريخ', time: 'وقت' };
+const TYPES = { text: 'نص', checkbox: 'صح/خطأ', select: 'قائمة', combo: 'قائمة مفتوحة', number: 'رقم', duration: 'مدة (h:mm)', date: 'تاريخ', time: 'وقت' };
 const pad = n => String(n).padStart(2, '0');
 const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const cap = window.Capacitor;
 const native = !!(cap && cap.isNativePlatform && cap.isNativePlatform());
-const plug = n => cap && cap.Plugins && cap.Plugins[n];
+/* تطبيق بلا bundler: لا يوجد Capacitor.Plugins، فنستدعي الجسر مباشرة (nativePromise / nativeCallback) */
+const plug = n => {
+  if (!native || typeof cap.nativePromise !== 'function') return null;
+  return new Proxy({}, { get: (_, m) => {
+    if (m === 'then') return undefined;
+    if (m === 'addListener') return (ev, fn) => { cap.nativeCallback(n, 'addListener', { eventName: ev }, fn); return Promise.resolve({ remove() {} }); };
+    return o => cap.nativePromise(n, String(m), o || {});
+  } });
+};
 const S = { tables: [], cur: null, data: {}, notes: { row: {}, table: '' }, notesTab: 'general', view: 'table', idx: 0, meta: {}, busy: false, route: 'home' };
 const defCols = () => [
   { name: 'التاريخ', type: 'text', width: '', options: '' },
@@ -33,7 +41,7 @@ function h(tag, attrs, ...kids) {
 }
 let tt, ft;
 function toast(msg, bad) { const t = $('#toast'); t.textContent = msg; t.className = 'show' + (bad ? ' bad' : ''); clearTimeout(tt); tt = setTimeout(() => { t.className = ''; }, 2800); }
-function flash() { const f = $('#saved'); f.classList.add('show'); clearTimeout(ft); ft = setTimeout(() => f.classList.remove('show'), 1100); }
+function flash() {}   // لا إشعار «تم الحفظ»: الحفظ تلقائي
 const mstack = [];   // النوافذ تتكدّس: فتح الساعة من داخل محرر المنبّه لا يُلغي المحرر
 function modal(build) {
   return new Promise(res => {
@@ -129,6 +137,26 @@ async function generate(tp, title, month, year) {
   const rows = Array.from({ length: n }, (_, i) => `${year}-${pad(month)}-${pad(i + 1)} (${DAYS[new Date(year, month - 1, i + 1).getDay()]})`);
   return DB.putTable({ title, columns: tp.columns, rows, keyCols: tp.keyCols, isTemplate: false });
 }
+/* ---------- قائمة خيارات منسّقة بدل نافذة النظام ---------- */
+function pickList(title, items, cur) {
+  return modal(close => [title ? h('p', { class: 'ptitle' }, title) : null,
+    h('div', { class: 'optlist' }, items.map(it => h('button', { type: 'button', class: 'opt' + (it.v === cur ? ' on' : ''), disabled: !!it.d, onclick: () => close({ v: it.v }) },
+      h('span', {}, it.l), it.v === cur ? h('i', { class: 'tick' }, '✓') : null))),
+    h('div', { class: 'btns' }, h('button', { class: 'btn ghost', type: 'button', onclick: () => close(null) }, 'إلغاء'))]);
+}
+async function openSelect(sel) {
+  const items = [...sel.options].map(o => ({ v: o.value, l: o.textContent, d: o.disabled }));
+  const r = await pickList(sel.getAttribute('data-title') || sel.title || '', items, sel.value);
+  if (r && r.v !== sel.value) { sel.value = r.v; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+}
+document.addEventListener('mousedown', e => { const s = e.target.closest && e.target.closest('select'); if (s && !s.disabled) { e.preventDefault(); openSelect(s); } }, true);
+document.addEventListener('click', e => { const s = e.target.closest && e.target.closest('select'); if (s) e.preventDefault(); }, true);
+function autoGrow(ta) {
+  const fit = () => { ta.style.height = 'auto'; ta.style.height = Math.max(ta.scrollHeight, 84) + 'px'; };
+  ta.classList.add('ag'); ta.addEventListener('input', fit); ta.addEventListener('focus', fit); setTimeout(fit, 30); setTimeout(fit, 350);
+  return ta;
+}
+
 /* ---------- ملاحظات وأدوات مساعدة ---------- */
 async function loadNotes(tid) {
   const n = { row: {}, table: '' };
@@ -166,7 +194,7 @@ function challenge() {
   });
 }
 const rowNoteBox = (t, r) => modal(close => {
-  const ta = h('textarea', { rows: 5, placeholder: 'اكتب ملاحظة لهذا اليوم…', value: S.notes.row[r] || '' });
+  const ta = autoGrow(h('textarea', { rows: 4, placeholder: 'اكتب ملاحظة لهذا اليوم…', value: S.notes.row[r] || '' }));
   setTimeout(() => ta.focus(), 60);
   return [h('p', {}, '📝 ' + r), ta, h('div', { class: 'btns' }, h('button', { class: 'btn ghost', onclick: () => close(null) }, 'إلغاء'), h('button', { onclick: () => close(ta.value.trim()) }, 'حفظ'))];
 });
@@ -205,12 +233,15 @@ const PALETTES = [
   { id: 'slate', name: 'فحمي', pri: '#475569', priD: '#94a3b8', acc: '#22c55e' },
   { id: 'brown', name: 'بني دافئ', pri: '#92400e', priD: '#d6a46a', acc: '#65a30d' }
 ];
-const curPal = () => PALETTES.find(p => p.id === S.meta.palette) || PALETTES[0];
+const COLORS = ['#2563eb', '#1d4ed8', '#0ea5e9', '#06b6d4', '#0d9488', '#059669', '#16a34a', '#65a30d', '#ca8a04', '#f59e0b', '#ea580c', '#dc2626',
+  '#e11d48', '#db2777', '#c026d3', '#7c3aed', '#4f46e5', '#475569', '#334155', '#1e293b', '#92400e', '#78716c', '#0f766e', '#be123c'];
+const curPal = () => { const p = PALETTES.find(x => x.id === S.meta.palette); return { pri: S.meta.pri || (p ? p.pri : '#2563eb'), acc: S.meta.acc || (p ? p.acc : '#10b981') }; };
 const mq = window.matchMedia ? matchMedia('(prefers-color-scheme: dark)') : { matches: false, addEventListener() {} };
 function applyTheme() {
   const m = S.meta.theme || 'auto', dark = m === 'dark' || (m === 'auto' && mq.matches), p = curPal(), st = document.documentElement.style;
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-  st.setProperty('--pri', dark ? p.priD : p.pri); st.setProperty('--ok', p.acc);
+  st.setProperty('--pri', dark ? `color-mix(in srgb, ${p.pri} 72%, #fff)` : p.pri);
+  st.setProperty('--ok', dark ? `color-mix(in srgb, ${p.acc} 85%, #fff)` : p.acc);
 }
 function tableSelect() {
   const real = S.tables.filter(t => !t.isTemplate);
@@ -230,7 +261,18 @@ function field(t, r, c, card) {
   };
   switch (c.type) {
     case 'checkbox': return h('input', { type: 'checkbox', checked: v === '1', onchange: e => save(e.target.checked ? '1' : '0') });
-    case 'select': return h('select', { onchange: e => save(e.target.value) }, h('option', { value: '' }, '--'),
+    case 'combo': {
+      const opts = (c.options || '').split(',').map(o => o.trim()).filter(Boolean), e = inp('text');
+      const pb = h('button', { type: 'button', class: 'cmb', tabindex: -1, 'aria-label': 'اختيار من القائمة', onclick: async () => {
+        const r = await pickList(c.name, [{ v: '', l: '— بدون قيمة —' }, ...opts.map(o => ({ v: o, l: o }))], e.value);
+        if (r) { e.value = r.v; save(r.v); }
+      } }, '▾');
+      const cb = h('div', { class: 'combo' + (e.value ? ' hasval' : '') }, e, pb);
+      const sy = () => cb.classList.toggle('hasval', !!e.value);
+      e.addEventListener('input', sy); e.addEventListener('change', sy); pb.addEventListener('click', () => setTimeout(sy, 0));
+      return cb;
+    }
+    case 'select': return h('select', { class: v ? 'hasval' : '', onchange: e => { save(e.target.value); e.target.classList.toggle('hasval', !!e.target.value); } }, h('option', { value: '' }, '--'),
       (c.options || '').split(',').map(o => o.trim()).filter(Boolean).map(o => h('option', { value: o, selected: o === v }, o)));
     case 'duration': case 'time': {
       const cur = { v };
@@ -256,8 +298,10 @@ const shortLabel = r => { const m = /^\d{4}-\d{2}-(\d{2}) \((.+)\)$/.exec(r); re
 const colStyle = c => { const w = c.width || (c.type === 'checkbox' ? '58' : ''); return w ? `width:${w}px;min-width:${w}px;max-width:${w}px` : ''; };
 const clampZ = z => Math.min(2, Math.max(0.5, Math.round(z * 100) / 100));
 let zt;
+function barShow(zb) { if (!zb) return; zb.classList.add('show'); clearTimeout(zb._t); zb._t = setTimeout(() => zb.classList.remove('show'), 1300); }
 function setZoom(tbl, label, z) {
   S.zoom = clampZ(z); tbl.style.zoom = S.zoom; label.textContent = Math.round(S.zoom * 100) + '%';
+  barShow(label.closest && label.closest('.zbar'));
   clearTimeout(zt); zt = setTimeout(() => { S.meta.zoom = S.zoom; DB.setMeta('zoom', S.zoom); }, 400);
 }
 const widthBox = (c, cur) => modal(close => {
@@ -311,15 +355,16 @@ function tableView(t, ti) {
       cs.map(c => h('td', {}, field(t, r, c)))))));
   tbl.style.zoom = S.zoom || 1;
   const pane = h('div', { class: 'pane' }, tbl), zl = h('button', { class: 'zl', title: 'إعادة إلى 100%', onclick: () => setZoom(tbl, zl, 1) }, Math.round((S.zoom || 1) * 100) + '%');
-  /* قرص بإصبعين للتكبير والتصغير */
+  const zbar = h('div', { class: 'zbar' }, h('button', { class: 'ib', onclick: () => setZoom(tbl, zl, (S.zoom || 1) - 0.1), title: 'تصغير' }, '−'), zl,
+    h('button', { class: 'ib', onclick: () => setZoom(tbl, zl, (S.zoom || 1) + 0.1), title: 'تكبير' }, '+'));
+  /* قرص بإصبعين للتكبير والتصغير، وتظهر الأزرار عند التحريك أو التكبير فقط */
   let d0 = 0, z0 = 1;
   const dist = ts => Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY);
+  pane.addEventListener('scroll', () => barShow(zbar), { passive: true });
   pane.addEventListener('touchstart', e => { if (e.touches.length === 2) { d0 = dist(e.touches); z0 = S.zoom || 1; } }, { passive: true });
   pane.addEventListener('touchmove', e => { if (e.touches.length === 2 && d0) { e.preventDefault(); setZoom(tbl, zl, z0 * dist(e.touches) / d0); } }, { passive: false });
   pane.addEventListener('touchend', e => { if (e.touches.length < 2) d0 = 0; }, { passive: true });
-  return h('div', { class: 'zwrap' }, pane, h('div', { class: 'zbar' },
-    h('button', { class: 'ib', onclick: () => setZoom(tbl, zl, (S.zoom || 1) - 0.1), title: 'تصغير' }, '−'), zl,
-    h('button', { class: 'ib', onclick: () => setZoom(tbl, zl, (S.zoom || 1) + 0.1), title: 'تكبير' }, '+')));
+  return h('div', { class: 'zwrap' }, pane, zbar);
 }
 function cardEl(t, i, ti) {
   const r = t.rows[i], cs = orderedCols(t).filter(c => !t.keyCols.includes(c.name)), cbs = cs.filter(c => c.type === 'checkbox');
@@ -331,14 +376,14 @@ function cardEl(t, i, ti) {
   let last = null;
   const body = cs.map(c => {
     const g = c.group || (anyG ? 'أخرى' : ''), head = g && g !== last ? h('h4', { class: 'grp' }, g) : null; last = g;
-    const f = c.type === 'checkbox' ? h('label', { class: 'f chk' }, field(t, r, c, true), h('span', {}, c.name))
-      : h(c.type === 'number' || c.type === 'time' || c.type === 'duration' ? 'div' : 'label', { class: 'f' }, h('span', {}, c.name), field(t, r, c, true));
-    return [head, f];
+    const tag = ['number', 'time', 'duration'].includes(c.type) ? 'div' : 'label';
+    return [head, h(tag, { class: 'f' + (c.type === 'checkbox' ? ' chk' : '') }, h('span', {}, c.name), field(t, r, c, true))];   // الاسم على اليمين ثم القيمة في السطر نفسه
   });
-  const note = h('textarea', { rows: 2, placeholder: 'ملاحظة لهذا اليوم…', value: S.notes.row[r] || '' });
+  const note = autoGrow(h('textarea', { rows: 3, placeholder: 'اكتب ملاحظة لهذا اليوم…', value: S.notes.row[r] || '' }));
   let nt; note.addEventListener('input', () => { clearTimeout(nt); nt = setTimeout(() => setNote('row', t.id, r, note.value.trim()), 500); });
   const el = h('article', { class: 'card' + (i === ti ? ' today' : ''), onchange: upd }, h('h3', {}, h('span', {}, '📌 ' + r), cbs.length ? prog : null),
-    cbs.length ? h('div', { class: 'meter' }, fill) : null, body, h('label', { class: 'f' }, h('span', {}, '📝 ملاحظة اليوم'), note));
+    cbs.length ? h('div', { class: 'meter' }, fill) : null, body,
+    h('div', { class: 'f notef' }, h('span', {}, '📝 ملاحظة اليوم'), h('div', { class: 'note' }, note)));
   upd(); return el;
 }
 function singleView(t, ti) {
@@ -361,7 +406,8 @@ const allView = (t, ti) => h('div', { class: 'pane' }, h('div', { class: 'cards'
 function scrollToday() {
   const el = $('.today');
   if (!el || !el.scrollIntoView) return;
-  el.scrollIntoView({ behavior: 'smooth', block: el.tagName === 'ARTICLE' ? 'start' : 'center', inline: 'center' });
+  const card = el.tagName === 'ARTICLE';
+  el.scrollIntoView({ behavior: 'smooth', block: card ? 'start' : 'center', inline: card ? 'center' : 'start' });
 }
 const viewMode = t => S.view || (t.columns.length > 8 ? 'card' : 'table');
 const hasDates = t => t.rows.some(r => /^\d{4}-\d{2}-\d{2}/.test(r));
@@ -384,9 +430,10 @@ function renderHome(bar, view) {
     return;
   }
   const ti = todayIdx(t), mode = viewMode(t), now = new Date();
-  bar.append(tableSelect(), ti >= 0 ? h('button', { class: 'ib txt', onclick: () => { S.idx = ti; if (mode === 'card') render('home'); else scrollToday(); } }, 'اليوم') : null,
-    h('select', { class: 'vsel', title: 'طريقة العرض', onchange: e => { S.view = e.target.value; DB.setMeta('view', S.view); render('home'); } },
-      [['table', 'جدول'], ['card', 'بطاقة'], ['all', 'كل البطاقات']].map(([k, l]) => h('option', { value: k, selected: mode === k }, l))));
+  const viewSel = h('select', { class: 'vsel', title: 'طريقة العرض', onchange: e => { S.view = e.target.value; DB.setMeta('view', S.view); render('home'); } },
+    [['table', 'جدول'], ['card', 'بطاقة'], ['all', 'كل البطاقات']].map(([k, l]) => h('option', { value: k, selected: mode === k }, l)));
+  bar.append(tableSelect(), viewSel);
+  if (ti >= 0) bar.append(h('button', { class: 'ib txt', onclick: () => { S.idx = ti; if (mode === 'card') render('home'); else scrollToday(); } }, 'اليوم'));
   const src = newestFirst(S.tables.filter(x => !x.isTemplate && hasDates(x)))[0];
   const banner = src && !monthCovered(now.getFullYear(), now.getMonth() + 1)
     ? h('div', { class: 'banner' }, h('span', {}, `لا يوجد جدول لشهر ${MONTHS[now.getMonth()]}.`),
@@ -423,7 +470,7 @@ function statsFor(t) {
     } else if (c.type === 'duration') {
       const m = vs.map(parseDur).filter(x => x != null);
       if (m.length) { const sum = m.reduce((a, b) => a + b, 0); add(c, { label: c.name, value: fmtDur(sum), sub: `المتوسط ${fmtDur(sum / m.length)}، في ${m.length} يوم` }); }
-    } else if (c.type === 'select') {
+    } else if (c.type === 'select' || c.type === 'combo') {
       const cnt = new Map(); vs.filter(Boolean).forEach(v => cnt.set(v, (cnt.get(v) || 0) + 1));
       if (cnt.size) add(c, { label: c.name, value: String(vs.filter(Boolean).length), sub: [...cnt].map(([k, n]) => `${k}: ${n}`).join('، ') });
     } else {
@@ -487,7 +534,7 @@ function colRow(c, isKey) {
   const typ = h('select', { class: 'ctype', onchange: () => sync() }, Object.entries(TYPES).map(([k, l]) => h('option', { value: k, selected: k === c.type }, l)));
   const opts = h('input', { class: 'copts', placeholder: 'خيارات القائمة مفصولة بفاصلة', value: c.options || '' });
   const badge = h('span', { class: 'gbadge' });
-  function sync() { opts.hidden = typ.value !== 'select'; }
+  function sync() { opts.hidden = !['select', 'combo'].includes(typ.value); }
   sync();
   const el = h('div', { class: 'crow', 'data-orig': c.name || '', 'data-grp': c.group || '', 'data-width': c.width || '', 'data-key': isKey ? '1' : '' }, h('span', { class: 'drag' }, '☰'),
     h('input', { class: 'cname', placeholder: 'اسم العمود', value: c.name || '' }), typ,
@@ -613,7 +660,7 @@ async function renderNotes(bar, view) {
   view.append(h('div', { class: 'seg' }, [['general', 'عامة'], ['table', 'الجدول الحالي']].map(([k, l]) => h('button', { class: tab === k ? 'on' : '', onclick: () => { S.notesTab = k; render('notes'); } }, l))));
   const box = h('div', { style: 'margin-top:12px' });
   view.append(box);
-  const auto = (ta, fn) => { let tm; ta.addEventListener('input', () => { clearTimeout(tm); tm = setTimeout(() => fn(ta.value.trim()), 500); }); return ta; };
+  const auto = (ta, fn) => { let tm; autoGrow(ta); ta.addEventListener('input', () => { clearTimeout(tm); tm = setTimeout(() => fn(ta.value.trim()), 500); }); return ta; };
   if (tab === 'general') {
     const list = (await DB.notes(0)).sort((a, b) => b.u - a.u);
     const card = n => {
@@ -622,8 +669,9 @@ async function renderNotes(bar, view) {
         h('button', { class: 'btn sm ghost', onclick: async () => { if (!await confirmBox('حذف هذه الملاحظة؟', 'حذف')) return; await DB.delNote(n.k); el.remove(); } }, 'حذف')));
       return el;
     };
-    const add = h('button', { class: 'btn ok', onclick: () => { const el = card({ k: 'g|' + DB.uid(), t: 0, kind: 'general', r: '', text: '', u: Date.now() }); add.after(el); $('textarea', el).focus(); } }, '＋ ملاحظة جديدة');
-    box.append(add, ...list.map(card));
+    const lst = h('div', { class: 'nlist' }, ...list.map(card));
+    const add = h('button', { class: 'fab', onclick: () => { const el = card({ k: 'g|' + DB.uid(), t: 0, kind: 'general', r: '', text: '', u: Date.now() }); lst.prepend(el); $('textarea', el).focus(); } }, '＋ ملاحظة جديدة');
+    box.append(lst); view.append(add);
     if (!list.length) box.append(h('p', { class: 'msg' }, 'ملاحظات عامة لا علاقة لها بالجداول: أفكار، قوائم، تذكيرات…'));
     return;
   }
@@ -691,14 +739,23 @@ async function setPin(pin) {
 const checkPin = async pin => !!S.meta.pin && (await sha(S.meta.pin.s + pin)) === S.meta.pin.h;
 function unlock() { $('#lock').hidden = true; $('#app').hidden = false; }
 async function unlockFlow() {
-  if (!S.meta.pin) return unlock();
-  const p = await pinBox('أدخل الرمز');
-  if (p == null) return;
-  if (await checkPin(p)) unlock(); else toast('رمز غير صحيح', true);
+  if (!S.meta.pinLock) return unlock();
+  if (S.unl) return;
+  S.unl = true;
+  try {
+    const p = await pinBox('أدخل الرمز');
+    if (p == null) return;
+    if (await checkPin(p)) unlock(); else toast('رمز غير صحيح', true);
+  } finally { S.unl = false; }
 }
+const locked = () => !!(S.meta.disguise || S.meta.pinLock);
 function showLock() {
   const L = $('#lock');
-  Alarms.mountDisguise(L, unlockFlow);   // يظهر التطبيق كتطبيق منبّه؛ الضغط المطول على الساعة يفتح الجداول
+  if (S.meta.disguise) Alarms.mountDisguise(L, unlockFlow);   // يظهر كتطبيق منبّه؛ الضغط المطول على الساعة يفتح الجداول
+  else {
+    L.replaceChildren(h('div', { class: 'pinscreen' }, h('div', { class: 'lockico' }, '🔒'), h('h2', {}, 'جداولي'), h('button', { class: 'btn big', onclick: unlockFlow }, 'إدخال الرمز')));
+    setTimeout(unlockFlow, 250);
+  }
   L.hidden = false; $('#app').hidden = true;
 }
 function toCsv(t) {
@@ -740,7 +797,7 @@ async function askCurrentPin() {
   toast('رمز غير صحيح', true); return false;
 }
 async function changePin() { if (!await askCurrentPin()) return; const p = await pinBox('الرمز الجديد', true); if (p) { await setPin(p); toast('تم تحديث الرمز'); render('settings'); } }
-async function removePin() { if (!await askCurrentPin()) return; S.meta.pin = null; await DB.setMeta('pin', null); toast('تم حذف الرمز'); render('settings'); }
+async function removePin() { if (!await askCurrentPin()) return; S.meta.pin = null; S.meta.pinLock = false; await DB.setMeta('pin', null); await DB.setMeta('pinLock', false); toast('تم حذف الرمز'); render('settings'); }
 function exportModel(t) {
   const cs = orderedCols(t).filter(c => !hidKey(t, c)), today = ymd(new Date());
   return {
@@ -759,29 +816,36 @@ function renderSettings(bar, view) {
   const row = (label, ctl, sub) => h('div', { class: 'srow' }, h('div', {}, h('b', {}, label), sub && h('small', {}, sub)), ctl);
   const tog = (on, fn) => h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: !!on, onchange: e => fn(e.target.checked, e.target) }), h('span', { class: 'slider' }));
   const meta = (k, v) => { S.meta[k] = v; return DB.setMeta(k, v); };
+  const colorRow = (label, sub, key) => {
+    const cur = curPal()[key];
+    return h('div', { class: 'srow', style: 'flex-direction:column;align-items:stretch' }, h('div', {}, h('b', {}, label), h('small', {}, sub)),
+      h('div', { class: 'swatches' }, COLORS.map(c => h('button', { type: 'button', class: 'swatch' + (c.toLowerCase() === cur.toLowerCase() ? ' on' : ''), title: c, style: `background:${c}`,
+        onclick: async () => { await meta(key, c); applyTheme(); render('settings'); } })),
+        h('label', { class: 'swatch custom', title: 'لون مخصص' }, '＋', h('input', { type: 'color', value: cur, onchange: async e => { await meta(key, e.target.value); applyTheme(); render('settings'); } }))));
+  };
   view.append(
     h('section', { class: 'sec' }, h('h2', {}, 'المظهر'),
       row('وضع الإضاءة', h('select', { onchange: async e => { await meta('theme', e.target.value); applyTheme(); } },
         [['auto', 'تلقائي'], ['light', 'فاتح'], ['dark', 'داكن']].map(([k, l]) => h('option', { value: k, selected: (S.meta.theme || 'auto') === k }, l)))),
-      h('div', { class: 'srow', style: 'flex-direction:column;align-items:stretch' }, h('div', {}, h('b', {}, 'مجموعة الألوان'), h('small', {}, 'تُطبَّق على الأزرار والإطارات والتدرجات والعناوين')),
-        h('div', { class: 'swatches' }, PALETTES.map(p => h('button', { class: 'swatch' + (curPal().id === p.id ? ' on' : ''), title: p.name, style: `background:linear-gradient(135deg,${p.pri} 50%,${p.acc} 50%)`,
-          onclick: async () => { await meta('palette', p.id); applyTheme(); render('settings'); } })))),
+      colorRow('اللون الأساسي', 'الأزرار والإطارات والعناوين والتدرجات', 'pri'),
+      colorRow('اللون الثانوي', 'اليوم الحالي والتأكيد والنجاح', 'acc'),
       row('العرض الافتراضي للبيانات', h('select', { onchange: async e => { S.view = e.target.value === 'auto' ? null : e.target.value; await meta('view', S.view); } },
         [['auto', 'تلقائي (بحسب عدد الأعمدة)'], ['table', 'جدول'], ['card', 'بطاقة'], ['all', 'كل البطاقات']].map(([k, l]) => h('option', { value: k, selected: (S.view || 'auto') === k }, l)))),
       row('الجولة التعريفية', h('button', { class: 'btn sm ghost', onclick: () => showTour() }, 'عرض'))),
-    h('section', { class: 'sec' }, h('h2', {}, 'القفل'),
-      row('شاشة التمويه', tog(S.meta.lock, async (on, el) => {
-        if (!on && S.meta.pin) {
-          const p = await pinBox('أدخل الرمز لإيقاف القفل');
-          if (p == null) return render('settings');
-          if (!(await checkPin(p))) { toast('رمز غير صحيح', true); return render('settings'); }
+    h('section', { class: 'sec' }, h('h2', {}, 'الأمان'),
+      row('قفل برقم سري', tog(S.meta.pinLock, async on => {
+        if (on) {
+          if (!S.meta.pin) { const p = await pinBox('اختر رمزاً من 4 أرقام أو أكثر', true); if (!p) return render('settings'); await setPin(p); }
+          await meta('pinLock', true); toast('تم تفعيل القفل برقم سري');
+        } else {
+          if (!(await askCurrentPin())) return render('settings');
+          await meta('pinLock', false);
         }
-        await meta('lock', on);
-        if (on && !S.meta.pin) { const p = await pinBox('اختر رمزاً من 4 أرقام أو أكثر (اختياري — بدونه تكفي الضغطات السرّية)', true); if (p) { await setPin(p); toast('تم تعيين الرمز'); } }
         render('settings');
-      }), 'يظهر التطبيق كتطبيق منبّه. اضغط مطولاً على أيقونة الساعة في أعلى الصفحة لفتح الجداول.'),
-      S.meta.lock ? row('رمز الدخول', h('div', { class: 'acts' }, h('button', { class: 'btn sm', onclick: changePin }, S.meta.pin ? 'تغيير' : 'تعيين'), S.meta.pin ? h('button', { class: 'btn sm danger', onclick: removePin }, 'حذف') : null)) : null,
-      h('p', { class: 'msg' }, 'القفل يخفي الواجهة فقط، ولا يشفّر البيانات المخزّنة على الجهاز.')),
+      }), 'يطلب الرمز عند كل فتح للتطبيق'),
+      S.meta.pin ? row('الرمز', h('div', { class: 'acts' }, h('button', { class: 'btn sm', onclick: changePin }, 'تغيير'), h('button', { class: 'btn sm danger', onclick: removePin }, 'حذف'))) : null,
+      row('شاشة التمويه', tog(S.meta.disguise, async on => { await meta('disguise', on); render('settings'); }), 'يظهر التطبيق كتطبيق منبّه عند فتحه. اضغط مطولاً على أيقونة الساعة للدخول. مستقلة عن الرمز السري'),
+      h('p', { class: 'msg' }, 'القفل والتمويه يخفيان الواجهة فقط، ولا يشفّران البيانات المخزّنة على الجهاز.')),
     Alarms.settings({ row, tog, meta }),
     h('section', { class: 'sec' }, h('h2', {}, 'النسخ الاحتياطي والتصدير'),
       h('div', { class: 'btns', style: 'flex-direction:column' },
@@ -839,18 +903,22 @@ async function boot() {
   try { await DB.open(); } catch (e) { document.body.textContent = 'تعذّر فتح التخزين المحلي على هذا الجهاز'; return; }
   S.meta = await DB.meta(); S.view = S.meta.view || null; S.zoom = clampZ(S.meta.zoom || 1);
   if (!S.meta.dev) { S.meta.dev = DB.uid(); DB.setMeta('dev', S.meta.dev); }
+  if (S.meta.lock != null && S.meta.disguise === undefined) {   // ترحيل: الخيار القديم كان يجمع التمويه والرمز
+    S.meta.disguise = !!S.meta.lock; S.meta.pinLock = !!(S.meta.lock && S.meta.pin);
+    DB.setMeta('disguise', S.meta.disguise); DB.setMeta('pinLock', S.meta.pinLock); DB.setMeta('lock', null); S.meta.lock = null;
+  }
   await reload(); S.idx = Math.max(S.cur ? todayIdx(S.cur) : 0, 0);
   applyTheme(); mq.addEventListener && mq.addEventListener('change', applyTheme);
   $('#imp').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; S.busy = false; if (f) doImport(f); });
   window.addEventListener('hashchange', route);
-  document.addEventListener('visibilitychange', () => { if (document.hidden && S.meta.lock && !S.busy) showLock(); });
-  if (S.meta.lock) showLock();
+  document.addEventListener('visibilitychange', () => { if (document.hidden && locked() && !S.busy) showLock(); });
+  if (locked()) showLock();
   route();
   const AP = plug('App'); if (native && AP && AP.addListener) AP.addListener('backButton', onBack);
   Alarms.sync(); Alarms.checkLaunch();
   window.addEventListener('alarmLaunch', () => Alarms.checkLaunch());
   document.addEventListener('visibilitychange', () => { if (!document.hidden) Alarms.checkLaunch(); });
-  if (!S.meta.tour && !S.meta.lock) setTimeout(showTour, 700);
+  if (!S.meta.tour && !locked()) setTimeout(showTour, 700);
   if ('serviceWorker' in navigator && !native && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 Object.assign(window.App, { S, DB, ymd, DAYS, MONTHS, native, plug, reload, field, orderedCols, baseName });

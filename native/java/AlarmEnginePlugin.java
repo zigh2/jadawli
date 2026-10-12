@@ -33,6 +33,18 @@ public class AlarmEnginePlugin extends Plugin {
         call.resolve();
     }
 
+    /** تنبيه تجريبي بعد seconds ثانية. */
+    @PluginMethod
+    public void test(PluginCall call) {
+        Integer s = call.getInt("seconds", 10);
+        try {
+            AlarmEngine.test(getContext(), s == null ? 10 : s);
+            call.resolve();
+        } catch (Exception e) {
+            call.reject("تعذّر جدولة التجربة");
+        }
+    }
+
     /** إيقاف التذكير والتكرار لليوم المحدد. */
     @PluginMethod
     public void stopToday(PluginCall call) {

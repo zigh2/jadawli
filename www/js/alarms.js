@@ -56,7 +56,11 @@ function cellChanged(tid, r, cname) {
     ae.setDone({ id: a.id, date: today, done }).catch(() => {});
   });
 }
-async function saveList(l) { const a = A(); a.S.meta.alarms = l; await a.DB.setMeta('alarms', l); sync(); }
+async function ensureNotif() {
+  const ae = AE(), a = A(); if (!ae || a.S.meta.notifAsked) return;
+  try { const st = await ae.status(); if (st.notif === false) { a.S.meta.notifAsked = true; a.DB.setMeta('notifAsked', true); await ae.requestNotifications(); } } catch (e) {}
+}
+async function saveList(l) { const a = A(); a.S.meta.alarms = l; await a.DB.setMeta('alarms', l); sync(); if (l.length) ensureNotif(); }
 
 /* ---------- المحرر ---------- */
 async function edit(old, disguise) {
@@ -132,7 +136,8 @@ function clockCard() {
 async function permBanner(box) {
   const { h, native, toast } = A(), ae = AE();
   if (!native || !ae) { box.append(h('p', { class: 'msg' }, 'تعمل المنبهات فعلياً داخل تطبيق الأندرويد فقط؛ هنا تُحفظ إعداداتها فقط.')); return; }
-  let st = {}; try { st = await ae.status(); } catch (e) {}
+  let st = null; try { st = await ae.status(); } catch (e) {}
+  if (!st) { box.append(h('div', { class: 'banner' }, h('span', {}, 'المحرك الأصلي للمنبهات غير موجود في هذه النسخة، فلن ترنّ المنبهات. ثبّت النسخة الكاملة jadawli-full.apk (انظر ملف README).'))); return; }
   const warn = (msg, btn, fn) => box.append(h('div', { class: 'banner' }, h('span', {}, msg), h('button', { class: 'btn sm', onclick: fn }, btn)));
   if (st.notif === false) warn('الإشعارات متوقفة فلن ترنّ المنبهات.', 'تفعيل', async () => { try { await ae.requestNotifications(); } catch (e) {} setTimeout(async () => { const s = await ae.status(); if (!s.notif) ae.openSettings({ which: 'notif' }); }, 800); });
   if (st.fsi === false) warn('السماح بالإشعارات بملء الشاشة مطلوب لتظهر شاشة التنبيه فوق القفل.', 'السماح', () => ae.openSettings({ which: 'fsi' }));
@@ -141,7 +146,11 @@ function render(bar, view) {
   const { h, S } = A();
   bar.append(h('h1', {}, 'المنبهات'), h('button', { class: 'btn sm', onclick: async () => { if (await edit(null, false)) fillList(box, false, again); } }, '＋ منبّه'));
   const box = h('div', {}), again = () => fillList(box, false, again), perms = h('div', {});
-  view.append(clockCard(), perms, box);
+  const tools = A().native && AE() ? h('div', { class: 'atools' }, h('button', { class: 'btn sm ghost', onclick: async () => {
+    try { await AE().requestNotifications(); await AE().test({ seconds: 10 }); A().toast('سيصلك تنبيه تجريبي بعد 10 ثوانٍ. اقفل الشاشة الآن لتجرّب ظهوره فوق القفل'); }
+    catch (e) { A().toast('تعذّر تشغيل التجربة', true); }
+  } }, '🔔 تجربة التنبيه بعد 10 ثوانٍ')) : null;
+  view.append(clockCard(), perms, tools, box);
   permBanner(perms); fillList(box, false, again);
 }
 
@@ -164,9 +173,9 @@ function mountDisguise(L, unlock) {
 /* ---------- شاشة التنبيه بملء الشاشة ---------- */
 let ticker;
 async function openAlert(id, date, locked) {
-  const a = list().find(x => x.id === id), { h, S, ymd, reload, field, toast, DB, App } = Object.assign({}, A(), { App: A() });
+  const a = list().find(x => x.id === id), { h, S, ymd, reload, field, toast, DB } = A();
   const el = document.getElementById('alert');
-  if (!a || !el) return;
+  if (!a || !el) { try { await AE().endAlert({ close: false }); } catch (e) {} return; }
   const stopTicker = () => { clearInterval(ticker); };
   const L = resolveLink(a);
   if (L) await reload(L.t.id);

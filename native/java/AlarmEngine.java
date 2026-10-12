@@ -15,6 +15,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.List;
 import java.util.Locale;
 import java.util.TimeZone;
@@ -120,9 +121,26 @@ final class AlarmEngine {
         if (s != null) scheduleOne(c, s, System.currentTimeMillis());
     }
 
+    static final String TEST_ID = "__test__";
+
+    /** تنبيه تجريبي بعد عدد من الثواني، للتأكد أن الإشعار والصوت وملء الشاشة تعمل على هذا الهاتف. */
+    static void test(Context c, int secs) {
+        Intent i = new Intent(c, AlarmReceiver.class).setAction(ACT_FIRE).putExtra("id", TEST_ID).putExtra("type", Sched.MAIN);
+        PendingIntent pi = PendingIntent.getBroadcast(c, 424242, i, flags());
+        am(c).setAlarmClock(new AlarmManager.AlarmClockInfo(System.currentTimeMillis() + secs * 1000L, openPi(c, null, null)), pi);
+    }
+
     static void handle(Context c, Intent in) {
         String id = in.getStringExtra("id"), date = in.getStringExtra("date");
         if (id == null) return;
+        if (TEST_ID.equals(id)) {
+            Sched.Cfg t = new Sched.Cfg();
+            t.id = id; t.title = "تجربة المنبّه";
+            Sched.Ev e = new Sched.Ev();
+            e.type = Sched.MAIN; e.date = Sched.ymd(Calendar.getInstance()); e.main = System.currentTimeMillis(); e.at = e.main;
+            showAlert(c, t, e, false);
+            return;
+        }
         if (ACT_STOP.equals(in.getAction())) { stopToday(c, id, date == null ? "" : date); return; }
         Sched.Cfg a = find(c, id);
         if (a == null || !a.on) return;
