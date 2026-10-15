@@ -66,6 +66,8 @@ extra = f'''
             {LF}
         </activity-alias>
 
+        <!-- خدمة الرنين: تشغّل نغمة المنبّه في حلقة، وبدون تعريفها هنا يتجاهل أندرويد تشغيلها بصمت -->
+        <service android:name=".AlarmService" android:exported="false" android:foregroundServiceType="mediaPlayback" />
         <receiver android:name=".AlarmReceiver" android:exported="false" />
         <receiver android:name=".BootReceiver" android:exported="true">
             <intent-filter>
@@ -79,12 +81,18 @@ if x.count('</application>') != 1:
 x = x.replace('</application>', extra + '    </application>', 1)
 
 perms = ''.join(f'\n    <uses-permission android:name="android.permission.{p}" />' for p in
-                ['POST_NOTIFICATIONS', 'USE_FULL_SCREEN_INTENT', 'RECEIVE_BOOT_COMPLETED', 'VIBRATE', 'WAKE_LOCK'])
+                ['POST_NOTIFICATIONS', 'USE_FULL_SCREEN_INTENT', 'RECEIVE_BOOT_COMPLETED', 'VIBRATE', 'WAKE_LOCK', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_MEDIA_PLAYBACK'])
 anchor = '<uses-permission android:name="android.permission.INTERNET" />'
 if x.count(anchor) != 1:
     sys.exit('بنية المانيفست غير متوقعة: صلاحية INTERNET')
 x = x.replace(anchor, anchor + perms, 1)
 
-ET.fromstring(x)           # يتأكد أن XML سليم
+root_el = ET.fromstring(x)           # يتأكد أن XML سليم
+# كل Service/Receiver في native/java يجب أن يكون معرّفاً في المانيفست، وإلا يفشل الدمج بوضوح
+declared = {e.get('{http://schemas.android.com/apk/res/android}name') for e in root_el.iter() if e.tag in ('service', 'receiver')}
+for f in os.listdir(os.path.join(src, 'java')):
+    body = open(os.path.join(src, 'java', f), encoding='utf8').read()
+    if re.search(r'extends\s+(Service|BroadcastReceiver)\b', body) and '.' + f[:-5] not in declared:
+        sys.exit('المكوّن ' + f + ' غير معرّف في المانيفست')
 open(mf, 'w', encoding='utf8').write(x)
 print('manifest patched:', pkg)

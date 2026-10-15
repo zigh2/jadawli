@@ -1,0 +1,67 @@
+// جداولي — خادم المزامنة (Google Apps Script)
+// 1) غيّر كلمة السر في السطر التالي (نفس الكلمة تُكتب في التطبيق).
+var TOKEN = 'ضع-كلمة-سر-طويلة-هنا';
+var SHEET = 'records';
+
+/* ===== منطق الدمج (دالة نقية بلا اعتماد على Google): الأحدث يفوز لكل سجل ===== */
+function jdMerge(state, req, now) {
+  var changed = [];
+  (req.records || []).forEach(function (r) {
+    if (!r || !r.type || !r.key) return;
+    var id = r.type + '|' + r.key, cur = state[id];
+    if (!cur || Number(r.u) > Number(cur.u)) {
+      var rec = { type: r.type, key: r.key, json: r.json, u: Number(r.u) || 0, su: now };
+      state[id] = rec;
+      changed.push(rec);
+    }
+  });
+  var since = Number(req.since) || 0, out = [];
+  Object.keys(state).forEach(function (id) {
+    var s = state[id];
+    if (s.su > since) out.push({ type: s.type, key: s.key, json: s.json, u: s.u, su: s.su });
+  });
+  return { body: { ok: true, now: now, records: out }, changed: changed };
+}
+
+/* ===== واجهة Google ===== */
+function doPost(e) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(25000);
+  try {
+    var req = JSON.parse(e.postData.contents);
+    if (req.token !== TOKEN) return jdOut({ ok: false, error: 'bad-token' });
+    var sh = jdSheet(), state = jdLoad(sh), res = jdMerge(state, req, Date.now());
+    jdSave(sh, res.changed);
+    return jdOut(res.body);
+  } catch (err) {
+    return jdOut({ ok: false, error: String(err) });
+  } finally {
+    lock.releaseLock();
+  }
+}
+function doGet() { return jdOut({ ok: true, name: 'jadawli-sync' }); }
+function jdOut(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
+function jdSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(), sh = ss.getSheetByName(SHEET);
+  if (!sh) { sh = ss.insertSheet(SHEET); sh.appendRow(['type', 'key', 'json', 'u', 'su']); sh.setFrozenRows(1); }
+  return sh;
+}
+function jdLoad(sh) {
+  var v = sh.getDataRange().getValues(), st = {};
+  for (var i = 1; i < v.length; i++) {
+    var r = v[i];
+    if (r[0]) st[r[0] + '|' + r[1]] = { type: String(r[0]), key: String(r[1]), json: String(r[2]), u: Number(r[3]), su: Number(r[4]) };
+  }
+  return st;
+}
+function jdSave(sh, changed) {
+  if (!changed.length) return;
+  var v = sh.getDataRange().getValues(), idx = {}, add = [];
+  for (var i = 1; i < v.length; i++) idx[v[i][0] + '|' + v[i][1]] = i + 1;
+  changed.forEach(function (c) {
+    var row = idx[c.type + '|' + c.key];
+    if (row) sh.getRange(row, 1, 1, 5).setValues([[c.type, c.key, c.json, c.u, c.su]]);
+    else add.push([c.type, c.key, c.json, c.u, c.su]);
+  });
+  if (add.length) sh.getRange(sh.getLastRow() + 1, 1, add.length, 5).setValues(add);
+}

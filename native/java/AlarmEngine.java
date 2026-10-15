@@ -5,6 +5,7 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -254,7 +255,8 @@ final class AlarmEngine {
                 .putExtra("pre", a.pre).putExtra("post", a.post).putExtra("full", a.full)
                 .putExtra("date", e.date).putExtra("main", e.main).putExtra("type", e.type).putExtra("idx", e.idx).putExtra("secs", RING_SECS);
         try {
-            if (Build.VERSION.SDK_INT >= 26) c.startForegroundService(i); else c.startService(i);
+            ComponentName cn = Build.VERSION.SDK_INT >= 26 ? c.startForegroundService(i) : c.startService(i);
+            if (cn == null) throw new IllegalStateException("خدمة الرنين غير معرّفة في المانيفست");
             log(c, "RING start " + a.id + " type=" + e.type + " idx=" + e.idx);
         } catch (Exception ex) {
             log(c, "RING service failed: " + ex);

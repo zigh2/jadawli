@@ -25,7 +25,9 @@ const DB = (() => {
     },
     tables: () => rp(os('tables').getAll()),
     uid,
-    putTable: t => { t.uid = t.uid || uid(); return rp(os('tables', 'readwrite').put(t)); },
+    putTable: (t, keep) => { t.uid = t.uid || uid(); if (!keep) t.u = Date.now(); return rp(os('tables', 'readwrite').put(t)); },
+    allCells: () => rp(os('cells').getAll()),
+    allNotes: () => rp(os('notes').getAll()),
     async delTable(id) {
       const keys = await rp(os('cells').index('t').getAllKeys(id)), nkeys = await rp(os('notes').index('t').getAllKeys(id));
       const tx = db.transaction(['tables', 'cells', 'notes'], 'readwrite');
@@ -50,7 +52,7 @@ const DB = (() => {
       });
       all.forEach(x => {
         const r = rm.has(x.r) ? rm.get(x.r) : x.r, c = cm.has(x.c) ? cm.get(x.c) : x.c;
-        if (r !== x.r || c !== x.c) { st.delete(x.k); moved.push({ k: ck(tid, r, c), t: tid, r, c, v: x.v }); }
+        if (r !== x.r || c !== x.c) { st.delete(x.k); moved.push({ k: ck(tid, r, c), t: tid, r, c, v: x.v, u: Date.now() }); }
       });
       moved.forEach(x => st.put(x));
       await done(tx);
@@ -84,7 +86,7 @@ const DB = (() => {
     async replaceAll(tables, cells, notes = []) {
       const tx = db.transaction(['tables', 'cells', 'notes'], 'readwrite');
       ['tables', 'cells', 'notes'].forEach(n => tx.objectStore(n).clear());
-      tables.forEach(t => tx.objectStore('tables').put({ ...t, uid: t.uid || uid() }));
+      tables.forEach(t => tx.objectStore('tables').put({ ...t, uid: t.uid || uid(), u: t.u || Date.now() }));
       cells.forEach(x => tx.objectStore('cells').put({ k: ck(x.t, x.r, x.c), t: x.t, r: x.r, c: x.c, v: x.v, u: x.u || Date.now() }));
       notes.forEach(n => tx.objectStore('notes').put(n));
       await done(tx);

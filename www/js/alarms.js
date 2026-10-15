@@ -146,10 +146,7 @@ function render(bar, view) {
   const { h, S } = A();
   bar.append(h('h1', {}, 'المنبهات'), h('button', { class: 'btn sm', onclick: async () => { if (await edit(null, false)) fillList(box, false, again); } }, '＋ منبّه'));
   const box = h('div', {}), again = () => fillList(box, false, again), perms = h('div', {});
-  const tools = A().native && AE() ? h('div', { class: 'atools' }, h('button', { class: 'btn sm ghost', onclick: async () => {
-    try { await AE().requestNotifications(); await AE().test({ seconds: 10 }); A().toast('سيصلك تنبيه تجريبي بعد 10 ثوانٍ. اقفل الشاشة الآن لتجرّب ظهوره فوق القفل'); }
-    catch (e) { A().toast('تعذّر تشغيل التجربة', true); }
-  } }, '🔔 تجربة التنبيه بعد 10 ثوانٍ')) : null;
+  const tools = A().native && AE() ? h('div', { class: 'atools' }, h('button', { class: 'btn sm ghost', onclick: () => showDiag() }, '🔔 تشخيص وتجربة المنبّه')) : null;
   view.append(clockCard(), perms, tools, box);
   permBanner(perms); fillList(box, false, again);
 }
@@ -170,11 +167,83 @@ function mountDisguise(L, unlock) {
   fillList(box, true, again);
 }
 
+/* ---------- تشخيص المنبّه ---------- */
+const DND = { 0: 'غير معروف', 1: 'الكل مسموح', 2: 'الأولوية فقط', 3: 'لا مقاطعة', 4: 'المنبهات فقط' };
+async function collect() {
+  const ae = AE(); let s = null, log = '';
+  try { s = await ae.status(); } catch (e) { return { missing: true, log: '' }; }
+  try { log = ((await ae.getLog()) || {}).log || ''; } catch (e) {}
+  return { s, log };
+}
+function logSince(log, since) {
+  return log.split('\n').filter(Boolean).filter(l => {
+    const m = /^(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)/.exec(l); if (!m) return false;
+    const n = new Date(), t = new Date(n.getFullYear(), m[1] - 1, m[2], m[3], m[4], m[5]).getTime();
+    return t >= since - 1500;
+  });
+}
+/* يحوّل الحالة والسجل إلى سبب مرجّح بالعربية */
+function verdict(d, since) {
+  if (d.missing) return ['bad', 'المحرك الأصلي للمنبهات غير موجود في هذه النسخة، فثبّت jadawli-full.apk.'];
+  const s = d.s;
+  if (s.service === false) return ['bad', 'خدمة الرنين غير معرّفة في هذه النسخة، فهذا هو سبب عدم الرنين. ثبّت نسخة مبنية من آخر ملفات المشروع.'];
+  if (s.notif === false) return ['bad', 'الإشعارات متوقفة للتطبيق: فعّلها من «إعدادات الإشعارات».'];
+  if (since) {
+    const L = logSince(d.log, since), has = re => L.some(l => re.test(l));
+    if (!has(/FIRE id=__test__/)) return ['bad', 'لم يصل المنبّه إلى التطبيق خلال المهلة: النظام لم يوقظه. غالباً بسبب تحسين البطارية أو «التشغيل التلقائي» في هاتفك (' + (s.manufacturer || '') + '). افتح «استثناء من البطارية» وفعّل التشغيل التلقائي.'];
+    const fail = L.find(l => /failed|خطأ/i.test(l)); if (fail) return ['bad', 'وصل المنبّه لكن فشل جزء منه: ' + fail.slice(15)];
+    if (has(/SOUND started/)) return ['ok', 'عمل المنبّه: وصل وبدأ الرنين. إن لم تسمعه فارفع صوت «المنبهات» في الهاتف.'];
+    if (has(/RING start/)) return ['warn', 'وصل المنبّه وبدأت الخدمة لكن لم يُسجَّل بدء الصوت بعد؛ أعد التقرير بعد لحظات.'];
+    return ['warn', 'وصل المنبّه لكن لم يبدأ الرنين. راجع السجل أدناه.'];
+  }
+  if (s.alarmVol === 0) return ['warn', 'صوت «المنبهات» في الهاتف مغلق (0%)، فلن تسمع الرنين.'];
+  if (s.dnd >= 2 && s.dnd !== 4) return ['warn', 'وضع «عدم الإزعاج» مفعّل وقد يكتم المنبّه.'];
+  if (s.battery === false) return ['warn', 'تحسين البطارية مفعّل للتطبيق وقد يؤخر المنبّه في بعض الهواتف. جرّب التجربة للتأكد.'];
+  return ['ok', 'الإعدادات تبدو سليمة. اضغط «تجربة بعد 10 ثوانٍ» للتأكد فعلياً.'];
+}
+function reportText(d, since) {
+  if (d.missing) return 'المحرك الأصلي غير موجود';
+  const s = d.s, y = v => v ? 'نعم' : 'لا';
+  return ['أندرويد ' + s.sdk + ' — ' + (s.manufacturer || ''), 'الخدمة معرّفة: ' + y(s.service), 'الإشعارات مسموحة: ' + y(s.notif), 'ملء الشاشة مسموح: ' + y(s.fsi),
+    'صوت المنبهات: ' + s.alarmVol + '%', 'عدم الإزعاج: ' + (DND[s.dnd] || s.dnd), 'استثناء البطارية: ' + y(s.battery),
+    'أقرب منبّه في النظام: ' + (s.nextClock ? new Date(s.nextClock).toLocaleString('ar') : 'لا يوجد'), '', 'السجل:', (since ? logSince(d.log, since) : d.log.split('\n').slice(0, 14)).join('\n')].join('\n');
+}
+async function showDiag() {
+  const { h, modal, toast } = A(), ae = AE();
+  let d = await collect(), since = 0, busy = false;
+  await modal(close => {
+    const box = h('div', { class: 'diag' });
+    const draw = () => {
+      const [k, msg] = verdict(d, since), s = d.s || {}, row = (l, v, ok) => h('div', { class: 'dg' + (ok === false ? ' bad' : '') }, h('span', {}, l), h('b', {}, v));
+      const y = v => v ? 'نعم' : 'لا';
+      box.replaceChildren(h('div', { class: 'verdict ' + k }, busy ? 'جارٍ الانتظار… سيصل التنبيه التجريبي بعد قليل. اقفل الشاشة إن أردت تجربة القفل.' : msg),
+        d.missing ? null : h('div', {}, row('الخدمة معرّفة', y(s.service), s.service !== false), row('الإشعارات مسموحة', y(s.notif), s.notif !== false), row('صوت المنبهات', s.alarmVol + '%', s.alarmVol !== 0),
+          row('عدم الإزعاج', DND[s.dnd] || s.dnd, !(s.dnd >= 2 && s.dnd !== 4)), row('استثناء البطارية', y(s.battery), s.battery !== false)),
+        h('pre', { class: 'dlog' }, (since ? logSince(d.log, since) : d.log.split('\n').slice(0, 10)).join('\n') || 'لا يوجد سجل بعد'));
+    };
+    const test = async () => {
+      if (busy) return; busy = true; since = Date.now(); draw();
+      try { await ae.requestNotifications(); await ae.clearLog(); await ae.test({ seconds: 10 }); } catch (e) { busy = false; toast('تعذّر تشغيل التجربة', true); return; }
+      setTimeout(async () => { d = await collect(); busy = false; draw(); }, A().S.diagWait || 15000);
+    };
+    const copy = async () => {
+      const t = reportText(d, since);
+      try { await navigator.clipboard.writeText(t); toast('تم نسخ التقرير'); } catch (e) { const x = h('textarea', { value: t }); document.body.append(x); x.select(); try { document.execCommand('copy'); toast('تم نسخ التقرير'); } catch (z) { toast('تعذّر النسخ', true); } x.remove(); }
+    };
+    draw();
+    return [h('p', { class: 'ptitle' }, 'تشخيص المنبّه'), box,
+      h('div', { class: 'btns', style: 'flex-wrap:wrap' }, h('button', { onclick: test }, '🔔 تجربة بعد 10 ثوانٍ'), h('button', { class: 'btn ghost', onclick: copy }, 'نسخ التقرير')),
+      h('div', { class: 'btns', style: 'flex-wrap:wrap' }, h('button', { class: 'btn ghost sm', onclick: () => ae.openSettings({ which: 'notif' }) }, 'إعدادات الإشعارات'),
+        h('button', { class: 'btn ghost sm', onclick: () => ae.openSettings({ which: 'battery' }) }, 'البطارية'), h('button', { class: 'btn ghost', onclick: () => close(null) }, 'إغلاق'))];
+  });
+}
+
 /* ---------- شاشة التنبيه بملء الشاشة ---------- */
 let ticker;
 async function openAlert(id, date, locked) {
   const a = list().find(x => x.id === id), { h, S, ymd, reload, field, toast, DB } = A();
   const el = document.getElementById('alert');
+  try { await AE().silence(); } catch (e) {}
   if (!a || !el) { try { await AE().endAlert({ close: false }); } catch (e) {} return; }
   const stopTicker = () => { clearInterval(ticker); };
   const L = resolveLink(a);
@@ -202,7 +271,7 @@ async function openAlert(id, date, locked) {
 }
 async function checkLaunch() {
   const ae = AE(); if (!ae) return;
-  try { const r = await ae.getLaunch(); if (r && r.id) openAlert(r.id, r.date, r.locked); } catch (e) {}
+  try { const r = await ae.getLaunch(); if (r && r.id === '__test__') { await ae.silence(); await ae.endAlert({ close: false }); } else if (r && r.id) openAlert(r.id, r.date, r.locked); } catch (e) {}
 }
 
 /* ---------- قسم الإعدادات ---------- */
@@ -210,10 +279,6 @@ function settings(helpers) {
   const { row, tog, meta } = helpers, { h, native, toast } = A(), ae = AE();
   const kids = [h('h2', {}, 'المنبهات'), row('عرض الوقت بنظام 12 ساعة', tog(c12(), async on => { await meta('clock12', on); }), 'في شاشة المنبهات فقط؛ الجداول والبطاقات دائماً 24 ساعة بلا AM/PM')];
   if (native && ae) {
-    kids.push(row('تمويه الأيقونة والاسم', tog(!!A().S.meta.disguiseIcon, async (on, el) => {
-      try { await ae.setDisguise({ on }); await meta('disguiseIcon', on); toast(on ? 'ستظهر أيقونة «المنبّه» بعد لحظات' : 'عادت الأيقونة العادية'); }
-      catch (e) { el.checked = !on; toast('تعذّر تغيير الأيقونة', true); }
-    }), 'يظهر التطبيق في قائمة التطبيقات باسم «المنبّه» وبأيقونة ساعة'));
     kids.push(row('إعدادات الإشعارات', h('button', { class: 'btn sm ghost', onclick: () => ae.openSettings({ which: 'notif' }) }, 'فتح')));
     kids.push(row('استثناء من توفير البطارية', h('button', { class: 'btn sm ghost', onclick: () => ae.openSettings({ which: 'battery' }) }, 'فتح'), 'إن تأخرت المنبهات في بعض الهواتف'));
   }

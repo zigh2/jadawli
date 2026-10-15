@@ -1,6 +1,13 @@
 package __PKG__;
 
 import android.app.KeyguardManager;
+import android.content.ContentResolver;
+import android.content.ContentValues;
+import android.database.Cursor;
+import android.os.Environment;
+import android.provider.MediaStore;
+import android.util.Base64;
+import java.io.OutputStream;
 import android.app.NotificationManager;
 import android.content.ComponentName;
 import android.content.Context;
@@ -115,6 +122,14 @@ public class AlarmEnginePlugin extends Plugin {
             PowerManager pm = (PowerManager) c.getSystemService(Context.POWER_SERVICE);
             o.put("battery", pm.isIgnoringBatteryOptimizations(c.getPackageName()));
         } catch (Exception e) { o.put("battery", true); }
+        o.put("sdk", Build.VERSION.SDK_INT);
+        o.put("manufacturer", Build.MANUFACTURER);
+        try { c.getPackageManager().getServiceInfo(new ComponentName(c, AlarmService.class), 0); o.put("service", true); } catch (Exception e) { o.put("service", false); }
+        try { o.put("dnd", Build.VERSION.SDK_INT >= 23 ? nm.getCurrentInterruptionFilter() : 0); } catch (Exception e) { o.put("dnd", 0); }
+        try {
+            android.app.AlarmManager.AlarmClockInfo ni = AlarmEngine.am(c).getNextAlarmClock();
+            o.put("nextClock", ni == null ? 0 : ni.getTriggerTime());
+        } catch (Exception e) { o.put("nextClock", 0); }
         call.resolve(o);
     }
 
@@ -140,7 +155,12 @@ public class AlarmEnginePlugin extends Plugin {
 
     @PluginMethod
     public void requestNotifications(PluginCall call) {
-        if (Build.VERSION.SDK_INT >= 33) getActivity().requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 9001);
+        if (Build.VERSION.SDK_INT >= 33) {
+            getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() { getActivity().requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 9001); }
+            });
+        }
         call.resolve();
     }
 
@@ -163,6 +183,50 @@ public class AlarmEnginePlugin extends Plugin {
             call.resolve();
         } catch (Exception e) {
             call.reject("تعذّر فتح الإعدادات");
+        }
+    }
+
+    /** يحفظ نسخة احتياطية (zip مشفّر جاهز من الواجهة) في Download/Jadawli/Backup ويُبقي آخر keep نسخة. أندرويد 10 فما فوق. */
+    @PluginMethod
+    public void saveBackup(PluginCall call) {
+        if (Build.VERSION.SDK_INT < 29) { call.reject("يتطلب أندرويد 10 أو أحدث"); return; }
+        String name = call.getString("name", "jadawli-backup.zip");
+        String b64 = call.getString("data", "");
+        Integer k = call.getInt("keep", 30);
+        int keep = k == null ? 30 : Math.max(1, k);
+        try {
+            byte[] bytes = Base64.decode(b64, Base64.DEFAULT);
+            ContentResolver r = getContext().getContentResolver();
+            String rel = Environment.DIRECTORY_DOWNLOADS + "/Jadawli/Backup/";
+            r.delete(MediaStore.Downloads.EXTERNAL_CONTENT_URI, MediaStore.MediaColumns.RELATIVE_PATH + "=? AND " + MediaStore.MediaColumns.DISPLAY_NAME + "=?", new String[]{rel, name});
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            v.put(MediaStore.MediaColumns.MIME_TYPE, "application/zip");
+            v.put(MediaStore.MediaColumns.RELATIVE_PATH, rel);
+            v.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            android.net.Uri uri = r.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+            if (uri == null) { call.reject("تعذّر إنشاء الملف"); return; }
+            OutputStream os = r.openOutputStream(uri);
+            try { os.write(bytes); } finally { os.close(); }
+            ContentValues done = new ContentValues();
+            done.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            r.update(uri, done, null, null);
+            Cursor c = r.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, new String[]{MediaStore.MediaColumns._ID},
+                    MediaStore.MediaColumns.RELATIVE_PATH + "=?", new String[]{rel}, MediaStore.MediaColumns.DATE_ADDED + " DESC");
+            int n = 0;
+            if (c != null) {
+                try {
+                    while (c.moveToNext()) {
+                        if (++n > keep) r.delete(android.content.ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)), null, null);
+                    }
+                } finally { c.close(); }
+            }
+            JSObject o = new JSObject();
+            o.put("path", "Download/Jadawli/Backup/" + name);
+            o.put("count", Math.min(n, keep));
+            call.resolve(o);
+        } catch (Exception e) {
+            call.reject("تعذّر حفظ النسخة: " + e.getMessage());
         }
     }
 }

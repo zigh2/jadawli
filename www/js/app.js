@@ -62,6 +62,7 @@ function modal(build) {
   });
 }
 window.App = { h, modal, toast };
+$('#modal').addEventListener('click', e => { if (e.target === e.currentTarget && S.mc) S.mc(); });   // الضغط على الخلفية يغلق النافذة العليا
 const confirmBox = (msg, ok = 'تأكيد') => modal(close => [h('p', {}, msg),
   h('div', { class: 'btns' }, h('button', { class: 'btn ghost', onclick: () => close(false) }, 'إلغاء'), h('button', { class: 'danger', onclick: () => close(true) }, ok))]);
 function pinBox(title, again) {
@@ -120,6 +121,7 @@ async function pick(id) { await reload(id); S.idx = Math.max(todayIdx(S.cur), 0)
 function setCell(tid, r, c, v) {
   (S.data[r] = S.data[r] || {})[c] = v;
   if (window.Alarms) Alarms.cellChanged(tid, r, c);
+  if (window.Sync) Sync.touch();
   DB.setCell(tid, r, c, v).then(flash, () => toast('تعذّر الحفظ', true));
 }
 function derive(r, name) {
@@ -163,11 +165,19 @@ async function loadNotes(tid) {
   (await DB.notes(tid)).forEach(x => { if (x.kind === 'row') n.row[x.r] = x.text; else if (x.kind === 'table') n.table = x.text; });
   return n;
 }
+/* علامات حذف تُرسَل مع المزامنة: لجداول (uid) وللملاحظات */
+function tombAdd(uid) { if (!uid) return; S.meta.tomb = { ...(S.meta.tomb || {}), [uid]: Date.now() }; DB.setMeta('tomb', S.meta.tomb); }
+function noteGone(n) { S.meta.ntomb = [...(S.meta.ntomb || []).filter(x => x.k !== n.k), { k: n.k, t: n.t, kind: n.kind, r: n.r || '', u: Date.now() }]; DB.setMeta('ntomb', S.meta.ntomb); if (window.Sync) Sync.touch(); }
 function setNote(kind, tid, r, text) {
   const k = kind === 'row' ? `r|${tid}|${r}` : `t|${tid}`;
   if (kind === 'row') { if (text) S.notes.row[r] = text; else delete S.notes.row[r]; } else S.notes.table = text;
+  if (!text) noteGone({ k, t: tid, kind, r: r || '' });
   (text ? DB.putNote({ k, t: tid, kind, r: r || '', text, u: Date.now() }) : DB.delNote(k)).then(flash, () => toast('تعذّر الحفظ', true));
+  if (window.Sync) Sync.touch();
 }
+const hexA = (hex, a) => { const n = parseInt(String(hex).slice(1), 16); return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`; };
+const optColor = (c, v) => (c.colors && v && /^#[0-9a-f]{6}$/i.test(c.colors[v] || '')) ? c.colors[v] : '';
+function paint(node, c, v) { if (node && c.colors) { const k = optColor(c, v); node.style.backgroundColor = k ? hexA(k, 0.3) : ''; node.classList.toggle('colored', !!k); } }
 const showVal = (c, x) => (!x ? '' : c.type === 'duration' && parseDur(x) != null ? fmtDur(parseDur(x)) : x);
 /* الأعمدة التي تنتمي لمجموعة واحدة تظهر معاً عند أول ظهور للمجموعة */
 function orderedCols(t) {
@@ -265,14 +275,15 @@ function field(t, r, c, card) {
       const opts = (c.options || '').split(',').map(o => o.trim()).filter(Boolean), e = inp('text');
       const pb = h('button', { type: 'button', class: 'cmb', tabindex: -1, 'aria-label': 'اختيار من القائمة', onclick: async () => {
         const r = await pickList(c.name, [{ v: '', l: '— بدون قيمة —' }, ...opts.map(o => ({ v: o, l: o }))], e.value);
-        if (r) { e.value = r.v; save(r.v); }
+        if (r) { e.value = r.v; save(r.v); paint(cb.closest('td') || cb.closest('.f'), c, r.v); }
       } }, '▾');
       const cb = h('div', { class: 'combo' + (e.value ? ' hasval' : '') }, e, pb);
       const sy = () => cb.classList.toggle('hasval', !!e.value);
-      e.addEventListener('input', sy); e.addEventListener('change', sy); pb.addEventListener('click', () => setTimeout(sy, 0));
+      const pt = () => paint(cb.closest('td') || cb.closest('.f'), c, e.value);
+      e.addEventListener('input', () => { sy(); pt(); }); e.addEventListener('change', () => { sy(); pt(); }); pb.addEventListener('click', () => setTimeout(sy, 0));
       return cb;
     }
-    case 'select': return h('select', { class: v ? 'hasval' : '', onchange: e => { save(e.target.value); e.target.classList.toggle('hasval', !!e.target.value); } }, h('option', { value: '' }, '--'),
+    case 'select': return h('select', { class: v ? 'hasval' : '', onchange: e => { save(e.target.value); e.target.classList.toggle('hasval', !!e.target.value); paint(e.target.closest('td') || e.target.closest('.f'), c, e.target.value); } }, h('option', { value: '' }, '--'),
       (c.options || '').split(',').map(o => o.trim()).filter(Boolean).map(o => h('option', { value: o, selected: o === v }, o)));
     case 'duration': case 'time': {
       const cur = { v };
@@ -352,8 +363,8 @@ function tableView(t, ti) {
         if (v == null) return;
         setNote('row', t.id, r, v); th.classList.toggle('hasnote', !!v);
       } }, shortLabel(r)),
-      cs.map(c => h('td', {}, field(t, r, c)))))));
-  tbl.style.zoom = S.zoom || 1;
+      cs.map(c => { const td = h('td', {}, field(t, r, c)); paint(td, c, val(t, r, c.name)); return td; })))));
+  tbl.style.zoom = S.zoom || 1; tbl.style.setProperty('--tfs', (S.meta.tfs || 14) + 'px');
   const pane = h('div', { class: 'pane' }, tbl), zl = h('button', { class: 'zl', title: 'إعادة إلى 100%', onclick: () => setZoom(tbl, zl, 1) }, Math.round((S.zoom || 1) * 100) + '%');
   const zbar = h('div', { class: 'zbar' }, h('button', { class: 'ib', onclick: () => setZoom(tbl, zl, (S.zoom || 1) - 0.1), title: 'تصغير' }, '−'), zl,
     h('button', { class: 'ib', onclick: () => setZoom(tbl, zl, (S.zoom || 1) + 0.1), title: 'تكبير' }, '+'));
@@ -377,7 +388,8 @@ function cardEl(t, i, ti) {
   const body = cs.map(c => {
     const g = c.group || (anyG ? 'أخرى' : ''), head = g && g !== last ? h('h4', { class: 'grp' }, g) : null; last = g;
     const tag = ['number', 'time', 'duration'].includes(c.type) ? 'div' : 'label';
-    return [head, h(tag, { class: 'f' + (c.type === 'checkbox' ? ' chk' : '') }, h('span', {}, c.name), field(t, r, c, true))];   // الاسم على اليمين ثم القيمة في السطر نفسه
+    const row = h(tag, { class: 'f' + (c.type === 'checkbox' ? ' chk' : '') }, h('span', {}, c.name), field(t, r, c, true)); paint(row, c, val(t, r, c.name));
+    return [head, row];   // الاسم على اليمين ثم القيمة في السطر نفسه
   });
   const note = autoGrow(h('textarea', { rows: 3, placeholder: 'اكتب ملاحظة لهذا اليوم…', value: S.notes.row[r] || '' }));
   let nt; note.addEventListener('input', () => { clearTimeout(nt); nt = setTimeout(() => setNote('row', t.id, r, note.value.trim()), 500); });
@@ -520,7 +532,7 @@ function renderManage(bar, view) {
   };
   const del = async t => {
     if (!await confirmBox(`حذف «${t.title}» وكل بياناته نهائياً؟`, 'حذف')) return;
-    await DB.delTable(t.id); await reload(); render('manage'); toast('تم الحذف');
+    tombAdd(t.uid); await DB.delTable(t.id); await reload(); render('manage'); toast('تم الحذف'); if (window.Sync) Sync.touch();
   };
   const item = t => h('li', {}, h('span', {}, t.title), h('span', { class: 'acts' },
     h('a', { class: 'ib', href: '#/edit/' + t.id, title: 'تعديل' }, '✏️'), h('button', { class: 'ib', title: 'نسخ البنية', onclick: () => dup(t) }, '📄'), h('button', { class: 'ib', title: 'حذف', onclick: () => del(t) }, '🗑️')));
@@ -534,14 +546,34 @@ function colRow(c, isKey) {
   const typ = h('select', { class: 'ctype', onchange: () => sync() }, Object.entries(TYPES).map(([k, l]) => h('option', { value: k, selected: k === c.type }, l)));
   const opts = h('input', { class: 'copts', placeholder: 'خيارات القائمة مفصولة بفاصلة', value: c.options || '' });
   const badge = h('span', { class: 'gbadge' });
-  function sync() { opts.hidden = !['select', 'combo'].includes(typ.value); }
+  const cbtn = h('button', { type: 'button', class: 'btn sm ghost', onclick: () => editColors(el, opts) }, '🎨 ألوان الخيارات');
+  function sync() { const lst = ['select', 'combo'].includes(typ.value); opts.hidden = !lst; cbtn.hidden = !lst; }
   sync();
-  const el = h('div', { class: 'crow', 'data-orig': c.name || '', 'data-grp': c.group || '', 'data-width': c.width || '', 'data-key': isKey ? '1' : '' }, h('span', { class: 'drag' }, '☰'),
+  const el = h('div', { class: 'crow', 'data-orig': c.name || '', 'data-grp': c.group || '', 'data-width': c.width || '', 'data-key': isKey ? '1' : '', 'data-colors': c.colors ? JSON.stringify(c.colors) : '' }, h('span', { class: 'drag' }, '☰'),
     h('input', { class: 'cname', placeholder: 'اسم العمود', value: c.name || '' }), typ,
-    h('button', { class: 'x', title: 'حذف', onclick: e => { const row = e.currentTarget.closest('.crow'), p = row.parentNode; row.remove(); p.dispatchEvent(new Event('colchange')); } }, '✕'), badge, opts);
+    h('button', { class: 'x', title: 'حذف', onclick: e => { const row = e.currentTarget.closest('.crow'), p = row.parentNode; row.remove(); p.dispatchEvent(new Event('colchange')); } }, '✕'), badge, opts, cbtn);
   el.refresh = () => { const g = el.dataset.grp, k = el.dataset.key === '1'; badge.textContent = [g ? '🏷 ' + g : '', k ? '🔑 مفتاحي' : ''].filter(Boolean).join('   '); badge.hidden = !g && !k; };
   el.refresh();
   return el;
+}
+async function editColors(el, opts) {
+  const names = opts.value.split(',').map(x => x.trim()).filter(Boolean);
+  if (!names.length) return toast('اكتب خيارات القائمة أولاً', true);
+  let cur = {}; try { cur = JSON.parse(el.dataset.colors || '{}'); } catch (e) {}
+  const res = await modal(close => {
+    const rows = names.map(n => {
+      const sw = h('div', { class: 'swatches sm' });
+      const mark = () => [...sw.children].forEach(b => b.classList.toggle('on', (b.dataset.c || '') === (cur[n] || '')));
+      const mk = (c, label) => h('button', { type: 'button', class: 'swatch' + (c ? '' : ' none'), 'data-c': c || '', style: c ? `background:${c}` : '', title: c || 'بدون لون', onclick: () => { if (c) cur[n] = c; else delete cur[n]; mark(); } }, label || '');
+      sw.append(mk('', '∅'), ...COLORS.slice(0, 18).map(c => mk(c))); mark();
+      return h('div', { class: 'crow2' }, h('b', {}, n), sw);
+    });
+    return [h('p', { class: 'ptitle' }, 'لون الخلية لكل خيار'), h('div', { class: 'pick' }, rows),
+      h('div', { class: 'btns' }, h('button', { class: 'btn ghost', type: 'button', onclick: () => close(null) }, 'إلغاء'), h('button', { type: 'button', onclick: () => close(cur) }, 'حفظ'))];
+  });
+  if (!res) return;
+  const keep = {}; names.forEach(n => { if (res[n]) keep[n] = res[n]; });
+  el.dataset.colors = Object.keys(keep).length ? JSON.stringify(keep) : '';
 }
 const rowItem = name => h('div', { class: 'rrow', 'data-orig': name || '' }, h('span', { class: 'drag' }, '☰'),
   h('input', { class: 'rname', placeholder: 'مفتاح السطر', value: name || '' }),
@@ -617,14 +649,14 @@ function renderEdit(bar, view, arg) {
   cols.addEventListener('colchange', () => { redraw(); kdraw(); });
   const save = async () => {
     const name = title.value.trim();
-    const C = colEls().map(el => ({ name: $('.cname', el).value.trim(), type: $('.ctype', el).value, width: el.dataset.width || '', options: $('.copts', el).value.trim(), group: el.dataset.grp || '', key: el.dataset.key === '1', orig: el.dataset.orig })).filter(c => c.name);
+    const C = colEls().map(el => ({ name: $('.cname', el).value.trim(), type: $('.ctype', el).value, width: el.dataset.width || '', options: $('.copts', el).value.trim(), group: el.dataset.grp || '', key: el.dataset.key === '1', orig: el.dataset.orig, colors: (() => { try { return JSON.parse(el.dataset.colors || '{}'); } catch (e) { return {}; } })() })).filter(c => c.name);
     const R = $$('.rrow', rows).map(el => ({ name: $('.rname', el).value.trim(), orig: el.dataset.orig })).filter(r => r.name);
     if (!name) return toast('أدخل عنواناً', true);
     if (taken(name, old && old.id)) return toast('العنوان مستخدم مسبقاً', true);
     if (!C.length) return toast('أضف عموداً واحداً على الأقل', true);
     if (new Set(C.map(c => c.name)).size !== C.length) return toast('أسماء الأعمدة يجب ألا تتكرر', true);
     if (new Set(R.map(r => r.name)).size !== R.length) return toast('مفاتيح الأسطر يجب ألا تتكرر', true);
-    const rec = { title: name, isTemplate: tmpl.checked, keyCols: C.filter(c => c.key).map(c => c.name), columns: C.map(({ name, type, width, options, group }) => ({ name, type, width, options, group })), rows: R.map(r => r.name) };
+    const rec = { title: name, isTemplate: tmpl.checked, keyCols: C.filter(c => c.key).map(c => c.name), columns: C.map(({ name, type, width, options, group, colors }) => Object.assign({ name, type, width, options, group }, Object.keys(colors).length ? { colors } : {})), rows: R.map(r => r.name) };
     if (old) { rec.id = old.id; rec.uid = old.uid; }
     const id = await DB.putTable(rec);
     if (old) {
@@ -664,9 +696,9 @@ async function renderNotes(bar, view) {
   if (tab === 'general') {
     const list = (await DB.notes(0)).sort((a, b) => b.u - a.u);
     const card = n => {
-      const ta = auto(h('textarea', { rows: 4, value: n.text, placeholder: 'اكتب ملاحظتك…', style: 'width:100%' }), v => { n.text = v; n.u = Date.now(); (v ? DB.putNote(n) : DB.delNote(n.k)).then(flash); });
+      const ta = auto(h('textarea', { rows: 4, value: n.text, placeholder: 'اكتب ملاحظتك…', style: 'width:100%' }), v => { n.text = v; n.u = Date.now(); if (!v) noteGone(n); (v ? DB.putNote(n) : DB.delNote(n.k)).then(flash); if (v && window.Sync) Sync.touch(); });
       const el = h('div', { class: 'note' }, ta, h('div', { class: 'nfoot' }, h('small', {}, ymd(new Date(n.u))),
-        h('button', { class: 'btn sm ghost', onclick: async () => { if (!await confirmBox('حذف هذه الملاحظة؟', 'حذف')) return; await DB.delNote(n.k); el.remove(); } }, 'حذف')));
+        h('button', { class: 'btn sm ghost', onclick: async () => { if (!await confirmBox('حذف هذه الملاحظة؟', 'حذف')) return; noteGone(n); await DB.delNote(n.k); el.remove(); } }, 'حذف')));
       return el;
     };
     const lst = h('div', { class: 'nlist' }, ...list.map(card));
@@ -772,7 +804,7 @@ function validBackup(j) {
 const choiceBox = (msg, opts) => modal(close => [h('p', {}, msg), h('div', { class: 'btns', style: 'flex-direction:column' },
   opts.map(([k, l]) => h('button', { class: k === 'replace' ? 'danger' : '', onclick: () => close(k) }, l)), h('button', { class: 'btn ghost', onclick: () => close(null) }, 'إلغاء'))]);
 const cleanTable = t => ({ id: t.id, uid: t.uid ? String(t.uid) : undefined, title: String(t.title), isTemplate: !!t.isTemplate, keyCols: t.keyCols.map(String), rows: t.rows.map(String),
-  columns: t.columns.map(c => ({ name: String(c.name), type: TYPES[c.type] ? c.type : 'text', width: String(c.width || ''), options: String(c.options || ''), group: String(c.group || '') })) });
+  columns: t.columns.map(c => Object.assign({ name: String(c.name), type: TYPES[c.type] ? c.type : 'text', width: String(c.width || ''), options: String(c.options || ''), group: String(c.group || '') }, c.colors && typeof c.colors === 'object' ? { colors: Object.fromEntries(Object.entries(c.colors).filter(([k, v]) => /^#[0-9a-f]{6}$/i.test(v)).map(([k, v]) => [String(k), v])) } : {})) });
 async function doImport(f) {
   let j; try { j = JSON.parse(await f.text()); } catch (e) { return toast('الملف غير صالح', true); }
   if (!validBackup(j)) return toast('هذه ليست نسخة احتياطية صالحة', true);
@@ -803,7 +835,7 @@ function exportModel(t) {
   return {
     title: t.title, subtitle: `${t.rows.length} يوماً  •  ${today}`, pri: curPal().pri,
     cols: cs.map(c => ({ name: c.name, type: c.type, group: c.group || '' })),
-    rows: t.rows.map(r => ({ label: shortLabel(r), today: r.includes(today), cells: cs.map(c => showVal(c, val(t, r, c.name))) }))
+    rows: t.rows.map(r => ({ label: shortLabel(r), today: r.includes(today), cells: cs.map(c => showVal(c, val(t, r, c.name))), fills: cs.map(c => optColor(c, val(t, r, c.name))) }))
   };
 }
 async function exportPdf() {
@@ -829,6 +861,8 @@ function renderSettings(bar, view) {
         [['auto', 'تلقائي'], ['light', 'فاتح'], ['dark', 'داكن']].map(([k, l]) => h('option', { value: k, selected: (S.meta.theme || 'auto') === k }, l)))),
       colorRow('اللون الأساسي', 'الأزرار والإطارات والعناوين والتدرجات', 'pri'),
       colorRow('اللون الثانوي', 'اليوم الحالي والتأكيد والنجاح', 'acc'),
+      row('حجم الخط في الجدول', h('select', { onchange: async e => { await meta('tfs', +e.target.value); } },
+        [11, 12, 13, 14, 15, 16, 18, 20, 22, 24].map(n => h('option', { value: n, selected: (S.meta.tfs || 14) === n }, n + (n === 14 ? ' (الافتراضي)' : '')))), 'في الجدول فقط؛ لا يغيّر البطاقات ولا بقية التطبيق'),
       row('العرض الافتراضي للبيانات', h('select', { onchange: async e => { S.view = e.target.value === 'auto' ? null : e.target.value; await meta('view', S.view); } },
         [['auto', 'تلقائي (بحسب عدد الأعمدة)'], ['table', 'جدول'], ['card', 'بطاقة'], ['all', 'كل البطاقات']].map(([k, l]) => h('option', { value: k, selected: (S.view || 'auto') === k }, l)))),
       row('الجولة التعريفية', h('button', { class: 'btn sm ghost', onclick: () => showTour() }, 'عرض'))),
@@ -845,8 +879,14 @@ function renderSettings(bar, view) {
       }), 'يطلب الرمز عند كل فتح للتطبيق'),
       S.meta.pin ? row('الرمز', h('div', { class: 'acts' }, h('button', { class: 'btn sm', onclick: changePin }, 'تغيير'), h('button', { class: 'btn sm danger', onclick: removePin }, 'حذف'))) : null,
       row('شاشة التمويه', tog(S.meta.disguise, async on => { await meta('disguise', on); render('settings'); }), 'يظهر التطبيق كتطبيق منبّه عند فتحه. اضغط مطولاً على أيقونة الساعة للدخول. مستقلة عن الرمز السري'),
+      native && plug('AlarmEngine') ? row('تمويه الأيقونة والاسم', tog(!!S.meta.disguiseIcon, async (on, el) => {
+        try { await plug('AlarmEngine').setDisguise({ on }); await meta('disguiseIcon', on); toast(on ? 'ستظهر أيقونة «المنبّه» بعد لحظات' : 'عادت الأيقونة العادية'); }
+        catch (e) { el.checked = !on; toast('تعذّر تغيير الأيقونة', true); }
+      }), 'يظهر التطبيق في قائمة التطبيقات باسم «المنبّه» وبأيقونة ساعة') : null,
       h('p', { class: 'msg' }, 'القفل والتمويه يخفيان الواجهة فقط، ولا يشفّران البيانات المخزّنة على الجهاز.')),
     Alarms.settings({ row, tog, meta }),
+    Backup.settings({ row, tog, meta }),
+    Sync.settings({ row, tog, meta }),
     h('section', { class: 'sec' }, h('h2', {}, 'النسخ الاحتياطي والتصدير'),
       h('div', { class: 'btns', style: 'flex-direction:column' },
         h('button', { onclick: async () => saveFile(`jadawli-backup-${ymd(new Date())}.json`, 'application/json', JSON.stringify({ app: 'jadawli', v: 1, exported: new Date().toISOString(), ...await DB.exportAll() })) }, '⬇️ تصدير نسخة احتياطية (JSON)'),
@@ -857,7 +897,7 @@ function renderSettings(bar, view) {
       row('حذف كل البيانات', h('button', { class: 'danger sm', onclick: async () => {
         if (!await confirmBox('سيتم حذف كل الجداول والبيانات من هذا الجهاز نهائياً. تأكد من وجود نسخة احتياطية.', 'متابعة')) return;
         if (!await challenge()) return;
-        await DB.replaceAll([], []); await reload(); toast('تم حذف كل البيانات'); render('settings');
+        S.tables.forEach(t => tombAdd(t.uid)); await DB.replaceAll([], []); await reload(); toast('تم حذف كل البيانات'); render('settings');
       } }, 'حذف'), 'لا يمكن التراجع')));
 }
 
@@ -915,13 +955,13 @@ async function boot() {
   if (locked()) showLock();
   route();
   const AP = plug('App'); if (native && AP && AP.addListener) AP.addListener('backButton', onBack);
-  Alarms.sync(); Alarms.checkLaunch();
+  Backup.start(); Sync.start(); Msgs.start(); Alarms.sync(); Alarms.checkLaunch();
   window.addEventListener('alarmLaunch', () => Alarms.checkLaunch());
   document.addEventListener('visibilitychange', () => { if (!document.hidden) Alarms.checkLaunch(); });
   if (!S.meta.tour && !locked()) setTimeout(showTour, 700);
   if ('serviceWorker' in navigator && !native && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
-Object.assign(window.App, { S, DB, ymd, DAYS, MONTHS, native, plug, reload, field, orderedCols, baseName });
+Object.assign(window.App, { confirmBox, saveFile, b64, doImport, validBackup, applyTheme, render, S, DB, ymd, DAYS, MONTHS, native, plug, reload, field, orderedCols, baseName });
 window.__app = { PALETTES, applyTheme, showTour, onBack, setZoom, clampZ, S, boot, render, statsFor, toCsv, validBackup, generate, todayIdx, doImport, makeMonth, monthCovered, orderedCols, exportModel, setNote, challenge, removePin, changePin, setPin, checkPin };
 boot();
 })();

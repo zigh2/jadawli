@@ -215,3 +215,24 @@ td select.hasval{-webkit-appearance:none;appearance:none;background-image:none;t
 /* شاشة الرمز السري */
 .pinscreen{margin:auto;text-align:center;padding:24px}.lockico{font-size:54px}.pinscreen h2{margin:8px 0 18px;color:var(--pri)}
 .atools{margin-bottom:10px}
+
+/* تشخيص المنبّه */
+.diag .verdict{padding:12px;border-radius:12px;margin-bottom:10px;line-height:1.7;font-size:14px;border:1px solid var(--line)}
+.verdict.ok{background:color-mix(in srgb,var(--ok) 14%,var(--card));border-color:var(--ok)}.verdict.bad{background:color-mix(in srgb,var(--bad) 12%,var(--card));border-color:var(--bad)}.verdict.warn{background:color-mix(in srgb,var(--warn) 16%,var(--card));border-color:var(--warn)}
+.dg{display:flex;justify-content:space-between;padding:6px 2px;border-bottom:1px solid var(--line);font-size:14px}.dg.bad b{color:var(--bad)}
+.dlog{direction:ltr;text-align:left;font-size:11px;white-space:pre-wrap;word-break:break-all;max-height:150px;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:10px;color:var(--mute)}
+
+/* حجم خط الجدول وألوان الخلايا */
+table{--tfs:14px}th,td{font-size:var(--tfs)}thead th{font-size:calc(var(--tfs) - 2px)}
+td input:not([type=checkbox]),td select,td textarea,td .tbtn,td .combo input,.cmb{font-size:var(--tfs)}
+td.colored select,td.colored input{background:transparent!important}
+.f.colored{border-radius:10px;padding:0 8px}
+.swatches.sm{gap:6px;margin-top:4px}.swatches.sm .swatch{width:28px;height:28px}
+.swatch.none{background:var(--bg);color:var(--mute);display:flex;align-items:center;justify-content:center;font-size:14px}
+.crow2{padding:8px 0;border-bottom:1px solid var(--line)}.crow2 b{display:block;margin-bottom:4px}
+/* المزامنة */
+.steps{padding-inline-start:20px;line-height:1.9;font-size:14px;margin-bottom:10px}.msg.bad{color:var(--bad)}.msg.ok{color:var(--ok)}
+
+/* رسالة الجدول العام */
+#msg{position:fixed;inset:0;z-index:4800;background:linear-gradient(160deg,color-mix(in srgb,var(--pri) 92%,#000),color-mix(in srgb,var(--pri) 55%,#000));display:flex;align-items:center;justify-content:center;padding:28px;color:#fff;text-align:center}
+.mbox{max-width:420px;width:100%}.mbox img{max-width:100%;max-height:45vh;border-radius:16px;margin-bottom:18px}.mtext{font-size:26px;font-weight:700;line-height:1.6}.mbox small{display:block;margin-top:16px;opacity:.8}

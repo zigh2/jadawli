@@ -69,7 +69,7 @@ async function build(libs, bytes, model, opt = {}) {
   let [W, H] = SIZES[opt.size || 'A3'], s = fit(W, H);
   if (!opt.size && s < 5.5) { [W, H] = SIZES.A2; s = fit(W, H); }
 
-  const hx = (v, k = 1) => { const n = parseInt(String(v).slice(1), 16); return rgb(((n >> 16) & 255) / 255 * k, ((n >> 8) & 255) / 255 * k, (n & 255) / 255 * k); };
+  const hx = (v, k = 1, mix = 0) => { const n = parseInt(String(v).slice(1), 16), f = c => (c / 255 * k) * (1 - mix) + mix; return rgb(f((n >> 16) & 255), f((n >> 8) & 255), f(n & 255)); };
   const C = { pri: model.pri ? hx(model.pri) : rgb(.145, .388, .922), dark: model.pri ? hx(model.pri, .62) : rgb(.118, .227, .541), line: rgb(.8, .835, .88), alt: rgb(.973, .98, .988), today: rgb(.82, .98, .9), ok: rgb(.063, .725, .506), txt: rgb(.12, .16, .22), mute: rgb(.4, .45, .55), white: rgb(1, 1, 1) };
   const pg = doc.addPage([W, H]);
   const right = W - M, wL = (uL + PAD) * s, cw = u.map(x => (x + PAD) * s), rh = rowU * s, hh = hdrU * s, gh = gU * s;
@@ -99,7 +99,8 @@ async function build(libs, bytes, model, opt = {}) {
     const yb = hy - (ri + 1) * rh, fill = r.today ? C.today : ri % 2 ? C.alt : C.white;
     box(right, right - wL, yb, rh, fill); draw(pg, r.label, right - .5 * s, yb + (rh - s) / 2 + s * .22, s, true, C.txt);
     cols.forEach((c, i) => {
-      box(X[i].r, X[i].l, yb, rh, fill);
+      const fc = r.fills && r.fills[i];
+      box(X[i].r, X[i].l, yb, rh, fc ? hx(fc, 1, .62) : fill);
       const v = r.cells[i]; if (!v) return;
       const cx = (X[i].r + X[i].l) / 2, cy = yb + rh / 2;
       if (c.type === 'checkbox') {
