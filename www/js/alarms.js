@@ -14,6 +14,7 @@ function fmtTime(t, force12) {
 const daysText = a => !a.days.length || a.days.length === 7 ? 'كل يوم' : a.days.slice().sort((x, y) => x - y).map(d => DAYN[d]).join('، ');
 const mask = a => a.days.reduce((m, d) => m | (1 << d), 0);
 const toNative = a => ({ id: a.id, title: a.title || '', label: a.link ? a.link.col : '', time: a.time, days: mask(a), pre: +a.pre || 0, post: +a.post || 0, rep: +a.rep || 0, cnt: +a.cnt || 0, on: !!a.on, full: a.full !== false });
+const snoozeMin = a => Math.max(1, Math.min(120, +a.snooze || 10));
 const isFilled = (col, v) => col.type === 'checkbox' ? v === '1' : v != null && v !== '';
 
 /* الجدول والصف والعمود المرتبط بالمنبه اليوم (يتبع جدول الشهر الحالي تلقائياً) */
@@ -60,12 +61,25 @@ async function ensureNotif() {
   const ae = AE(), a = A(); if (!ae || a.S.meta.notifAsked) return;
   try { const st = await ae.status(); if (st.notif === false) { a.S.meta.notifAsked = true; a.DB.setMeta('notifAsked', true); await ae.requestNotifications(); } } catch (e) {}
 }
-async function saveList(l) { const a = A(); a.S.meta.alarms = l; await a.DB.setMeta('alarms', l); sync(); if (l.length) ensureNotif(); }
+async function ensureFsi() {
+  const ae = AE(), a = A(); if (!ae) return;
+  const last = +a.S.meta.fsiAsked || 0; if (last && Date.now() - last < 3 * 86400000) return;   // نعيد السؤال كل 3 أيام ما دام الإذن غير ممنوح
+  let st = {}; try { st = await ae.status(); } catch (e) { return; }
+  if (st.fsi !== false || !(st.sdk >= 34)) return;
+  a.S.meta.fsiAsked = Date.now(); a.DB.setMeta('fsiAsked', a.S.meta.fsiAsked);
+  const { h, modal } = a;
+  const go = await modal(close => [h('p', { class: 'ptitle' }, 'لإيقاظ الشاشة وظهور المنبّه فوق القفل'),
+    h('p', {}, 'يتطلب أندرويد ' + st.sdk + ' أن تسمح لهذا التطبيق بـ«الإشعارات بملء الشاشة». بدونها يرنّ المنبّه لكن الشاشة لا تستيقظ ولا يظهر فوق القفل.'),
+    h('div', { class: 'btns' }, h('button', { class: 'btn ghost', onclick: () => close(false) }, 'لاحقاً'), h('button', { onclick: () => close(true) }, 'فتح الإعداد'))]);
+  if (go) ae.openSettings({ which: 'fsi' });
+}
+async function saveList(l) { const a = A(); a.S.meta.alarms = l; await a.DB.setMeta('alarms', l); sync(); if (l.length) ensureNotif().then(ensureFsi); }
 
 /* ---------- المحرر ---------- */
 async function edit(old, disguise) {
   const { h, modal, S, toast, orderedCols } = A();
-  const a = old ? JSON.parse(JSON.stringify(old)) : { id: A().DB.uid(), title: '', time: '07:00', days: [], on: true, link: null, pre: 0, post: 0, rep: 0, cnt: 0, full: true };
+  const a = old ? JSON.parse(JSON.stringify(old)) : { id: A().DB.uid(), title: '', time: '07:00', days: [], on: true, link: null, pre: 0, post: 0, rep: 0, cnt: 0, full: true, snooze: 10 };
+  if (a.snooze == null) a.snooze = 10;
   const res = await modal(close => {
     const title = h('input', { class: 'plain', value: a.title, placeholder: 'مثل: صلاة الفجر' });
     const tb = h('button', { type: 'button', class: 'tbtn', style: 'font-size:22px', onclick: async () => { const r = await Clock.pick({ mode: 'time', value: a.time, title: 'وقت المنبّه' }); if (r) { a.time = r; tb.textContent = fmtTime(a.time); } } }, fmtTime(a.time));
@@ -98,7 +112,7 @@ async function edit(old, disguise) {
         h('div', { class: 'srow' }, h('div', {}, h('b', {}, 'تنبيه بملء الشاشة')), h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: a.full !== false, onchange: e => { a.full = e.target.checked; } }), h('span', { class: 'slider' }))));
       if (a.link) adv.open = true;
     }
-    return [h('p', {}, old ? 'تعديل المنبّه' : 'منبّه جديد'), fld('العنوان', title), fld('الوقت', tb), fld('الأيام (بلا تحديد = كل يوم)', days), linkBox, adv,
+    return [h('p', {}, old ? 'تعديل المنبّه' : 'منبّه جديد'), fld('العنوان', title), fld('الوقت', tb), fld('الأيام (بلا تحديد = كل يوم)', days), num('snooze', 'التأجيل عند «لاحقاً» (بالدقائق)'), linkBox, adv,
       h('div', { class: 'btns' }, old ? h('button', { class: 'danger', type: 'button', onclick: () => close({ del: true }) }, 'حذف') : null,
         h('button', { class: 'btn ghost', type: 'button', onclick: () => close(null) }, 'إلغاء'),
         h('button', { type: 'button', onclick: () => { a.title = title.value.trim(); close({ a }); } }, 'حفظ'))];
@@ -188,14 +202,16 @@ function verdict(d, since) {
   const s = d.s;
   if (s.service === false) return ['bad', 'خدمة الرنين غير معرّفة في هذه النسخة، فهذا هو سبب عدم الرنين. ثبّت نسخة مبنية من آخر ملفات المشروع.'];
   if (s.notif === false) return ['bad', 'الإشعارات متوقفة للتطبيق: فعّلها من «إعدادات الإشعارات».'];
+  const noFsi = s.fsi === false && s.sdk >= 34;
   if (since) {
     const L = logSince(d.log, since), has = re => L.some(l => re.test(l));
     if (!has(/FIRE id=__test__/)) return ['bad', 'لم يصل المنبّه إلى التطبيق خلال المهلة: النظام لم يوقظه. غالباً بسبب تحسين البطارية أو «التشغيل التلقائي» في هاتفك (' + (s.manufacturer || '') + '). افتح «استثناء من البطارية» وفعّل التشغيل التلقائي.'];
     const fail = L.find(l => /failed|خطأ/i.test(l)); if (fail) return ['bad', 'وصل المنبّه لكن فشل جزء منه: ' + fail.slice(15)];
-    if (has(/SOUND started/)) return ['ok', 'عمل المنبّه: وصل وبدأ الرنين. إن لم تسمعه فارفع صوت «المنبهات» في الهاتف.'];
+    if (has(/SOUND started/)) return noFsi ? ['warn', 'الرنين يعمل، لكن الشاشة لن تستيقظ ولن يظهر التنبيه فوق القفل لأن «الإشعارات بملء الشاشة» غير مسموحة. اضغط «السماح بملء الشاشة».'] : ['ok', 'عمل المنبّه: وصل وبدأ الرنين. إن لم تسمعه فارفع صوت «المنبهات» في الهاتف.'];
     if (has(/RING start/)) return ['warn', 'وصل المنبّه وبدأت الخدمة لكن لم يُسجَّل بدء الصوت بعد؛ أعد التقرير بعد لحظات.'];
     return ['warn', 'وصل المنبّه لكن لم يبدأ الرنين. راجع السجل أدناه.'];
   }
+  if (noFsi) return ['warn', 'أندرويد ' + s.sdk + ' لا يسمح للتطبيق بإيقاظ الشاشة وإظهار التنبيه فوق القفل إلا بعد أن تسمح له بـ«الإشعارات بملء الشاشة». اضغط «السماح بملء الشاشة».'];
   if (s.alarmVol === 0) return ['warn', 'صوت «المنبهات» في الهاتف مغلق (0%)، فلن تسمع الرنين.'];
   if (s.dnd >= 2 && s.dnd !== 4) return ['warn', 'وضع «عدم الإزعاج» مفعّل وقد يكتم المنبّه.'];
   if (s.battery === false) return ['warn', 'تحسين البطارية مفعّل للتطبيق وقد يؤخر المنبّه في بعض الهواتف. جرّب التجربة للتأكد.'];
@@ -217,7 +233,7 @@ async function showDiag() {
       const [k, msg] = verdict(d, since), s = d.s || {}, row = (l, v, ok) => h('div', { class: 'dg' + (ok === false ? ' bad' : '') }, h('span', {}, l), h('b', {}, v));
       const y = v => v ? 'نعم' : 'لا';
       box.replaceChildren(h('div', { class: 'verdict ' + k }, busy ? 'جارٍ الانتظار… سيصل التنبيه التجريبي بعد قليل. اقفل الشاشة إن أردت تجربة القفل.' : msg),
-        d.missing ? null : h('div', {}, row('الخدمة معرّفة', y(s.service), s.service !== false), row('الإشعارات مسموحة', y(s.notif), s.notif !== false), row('صوت المنبهات', s.alarmVol + '%', s.alarmVol !== 0),
+        d.missing ? null : h('div', {}, row('الخدمة معرّفة', y(s.service), s.service !== false), row('الإشعارات مسموحة', y(s.notif), s.notif !== false), row('ملء الشاشة مسموح (يوقظ الشاشة)', y(s.fsi !== false), s.fsi !== false), row('صوت المنبهات', s.alarmVol + '%', s.alarmVol !== 0),
           row('عدم الإزعاج', DND[s.dnd] || s.dnd, !(s.dnd >= 2 && s.dnd !== 4)), row('استثناء البطارية', y(s.battery), s.battery !== false)),
         h('pre', { class: 'dlog' }, (since ? logSince(d.log, since) : d.log.split('\n').slice(0, 10)).join('\n') || 'لا يوجد سجل بعد'));
     };
@@ -233,7 +249,7 @@ async function showDiag() {
     draw();
     return [h('p', { class: 'ptitle' }, 'تشخيص المنبّه'), box,
       h('div', { class: 'btns', style: 'flex-wrap:wrap' }, h('button', { onclick: test }, '🔔 تجربة بعد 10 ثوانٍ'), h('button', { class: 'btn ghost', onclick: copy }, 'نسخ التقرير')),
-      h('div', { class: 'btns', style: 'flex-wrap:wrap' }, h('button', { class: 'btn ghost sm', onclick: () => ae.openSettings({ which: 'notif' }) }, 'إعدادات الإشعارات'),
+      h('div', { class: 'btns', style: 'flex-wrap:wrap' }, h('button', { class: 'btn sm ok', onclick: () => ae.openSettings({ which: 'fsi' }) }, 'السماح بملء الشاشة'), h('button', { class: 'btn ghost sm', onclick: () => ae.openSettings({ which: 'notif' }) }, 'إعدادات الإشعارات'),
         h('button', { class: 'btn ghost sm', onclick: () => ae.openSettings({ which: 'battery' }) }, 'البطارية'), h('button', { class: 'btn ghost', onclick: () => close(null) }, 'إغلاق'))];
   });
 }
@@ -241,7 +257,12 @@ async function showDiag() {
 /* ---------- شاشة التنبيه بملء الشاشة ---------- */
 let ticker;
 async function openAlert(id, date, locked) {
-  const a = list().find(x => x.id === id), { h, S, ymd, reload, field, toast, DB } = A();
+  const { h, S, ymd, reload, field, toast, DB } = A();
+  let a = list().find(x => x.id === id);
+  if (!a && id === '__test__') {   // التنبيه التجريبي: منبّه افتراضي يؤجَّل دقيقة واحدة ليسهل اختبار «لاحقاً»
+    const n = new Date(); date = date || ymd(n);
+    a = { id, title: 'تجربة المنبّه', time: `${pad(n.getHours())}:${pad(n.getMinutes())}`, days: [], on: true, link: null, pre: 0, post: 0, rep: 0, cnt: 0, snooze: 1 };
+  }
   const el = document.getElementById('alert');
   try { await AE().silence(); } catch (e) {}
   if (!a || !el) { try { await AE().endAlert({ close: false }); } catch (e) {} return; }
@@ -256,11 +277,11 @@ async function openAlert(id, date, locked) {
   };
   tick(); ticker = setInterval(tick, 1000);
   const filled = () => !L || isFilled(L.col, (S.data[L.row] || {})[L.col.name]);
-  const doneBtn = h('button', { class: 'btn ok big' }, 'تم'), later = h('button', { class: 'btn ghost' }, 'لاحقاً'), stop = h('button', { class: 'btn ghost' }, 'إيقاف التذكير اليوم');
+  const doneBtn = h('button', { class: 'btn ok big' }, 'تم'), later = h('button', { class: 'btn ghost' }, `لاحقاً (${snoozeMin(a)} د)`), stop = h('button', { class: 'btn ghost' }, 'إيقاف التذكير اليوم');
   const finish = async () => { stopTicker(); el.hidden = true; el.replaceChildren(); try { await AE().endAlert({ close: !!locked }); } catch (e) {} };
   const refresh = () => { doneBtn.disabled = !filled(); };
   doneBtn.onclick = async () => { if (!filled()) return; try { await AE().setDone({ id, date, done: true }); } catch (e) {} await finish(); };
-  later.onclick = finish;
+  later.onclick = async () => { try { await AE().snooze({ id, date, minutes: snoozeMin(a) }); } catch (e) {} await finish(); };
   stop.onclick = async () => { try { await AE().stopToday({ id, date }); } catch (e) {} await finish(); };
   el.replaceChildren(h('div', { class: 'abox', onchange: refresh },
     h('div', { class: 'aclock' }, fmtTime(a.time)), h('h2', {}, a.title || 'المنبّه'), counter,
@@ -271,7 +292,7 @@ async function openAlert(id, date, locked) {
 }
 async function checkLaunch() {
   const ae = AE(); if (!ae) return;
-  try { const r = await ae.getLaunch(); if (r && r.id === '__test__') { await ae.silence(); await ae.endAlert({ close: false }); } else if (r && r.id) openAlert(r.id, r.date, r.locked); } catch (e) {}
+  try { const r = await ae.getLaunch(); if (r && r.id) openAlert(r.id, r.date, r.locked); } catch (e) {}
 }
 
 /* ---------- قسم الإعدادات ---------- */

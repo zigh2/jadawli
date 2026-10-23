@@ -12,6 +12,7 @@ import android.content.SharedPreferences;
 import android.media.AudioAttributes;
 import android.media.RingtoneManager;
 import android.os.Build;
+import android.os.PowerManager;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -109,9 +110,11 @@ final class AlarmEngine {
     /** يجدول كل المنبهات ويستعيد إشعارات النوافذ الجارية (بعد إعادة التشغيل أو تعديل الإعدادات). */
     static void scheduleAll(Context c) {
         long now = System.currentTimeMillis();
+        rearmSnoozes(c, null);
         for (Sched.Cfg a : load(c)) {
             scheduleOne(c, a, now);
             if (AlarmService.running) continue;           // لا نقطع رنيناً جارياً
+            if (snoozed(c, a.id)) continue;               // مؤجَّل: يبقى إشعار التأجيل كما هو
             Sched.Ev e = Sched.active(a, now, TimeZone.getDefault());
             if (e == null) nm(c).cancel(notifId(a.id));
             else if (e.type == Sched.PRE) showPre(c, a, e);
@@ -119,18 +122,105 @@ final class AlarmEngine {
         }
     }
 
+    /* ---------- التأجيل («لاحقاً») ---------- */
+    static final int SNOOZE_DEFAULT = 10;
+
+    static PendingIntent snoozePi(Context c, String id, long at, String date, long main) {
+        Intent i = new Intent(c, AlarmReceiver.class).setAction(ACT_FIRE).putExtra("id", id).putExtra("type", Sched.SNOOZE)
+                .putExtra("date", date).putExtra("main", main).putExtra("at", at);
+        return PendingIntent.getBroadcast(c, req(id) + 300000, i, flags());
+    }
+
+    static void armSnooze(Context c, String id, String date, long at, long main) {
+        try {
+            am(c).setAlarmClock(new AlarmManager.AlarmClockInfo(at, openPi(c, null, null)), snoozePi(c, id, at, date, main));
+        } catch (Exception ex) { log(c, "SNOOZE arm failed: " + ex); }
+    }
+
+    static void cancelSnooze(Context c, String id) {
+        sp(c).edit().remove("snz:" + id).apply();
+        try { am(c).cancel(snoozePi(c, id, 0, "", 0)); } catch (Exception e) { /* لا شيء */ }
+    }
+
+    /** موعد الحدث الأصلي (لحساب عدّاد + بعد التأجيل). */
+    static long mainOf(Context c, String id, String date, long fallback) {
+        Sched.Cfg a = find(c, id);
+        if (a == null || date == null || !date.matches("\\d{4}-\\d{2}-\\d{2}")) return fallback;
+        String[] p = date.split("-");
+        Calendar m = Calendar.getInstance();
+        m.clear();
+        m.set(Integer.parseInt(p[0]), Integer.parseInt(p[1]) - 1, Integer.parseInt(p[2]), a.hour, a.minute, 0);
+        return m.getTimeInMillis();
+    }
+
+    /** يؤجّل المنبّه: يوقف الرنين ويعيده بعد عدد من الدقائق، ويُبقي إشعاراً بعدّاد تنازلي. */
+    static void snooze(Context c, String id, String date, int minutes) {
+        int m = Math.max(1, Math.min(120, minutes <= 0 ? SNOOZE_DEFAULT : minutes));
+        long at = System.currentTimeMillis() + m * 60000L;
+        String d = date == null ? "" : date;
+        long main = mainOf(c, id, d, at);
+        sp(c).edit().putString("snz:" + id, d + "|" + at + "|" + main).apply();
+        stopRing(c);
+        armSnooze(c, id, d, at, main);
+        showSnoozed(c, id, d, at);
+        log(c, "SNOOZE " + id + " " + m + "min");
+    }
+
+    static void showSnoozed(Context c, String id, String date, long at) {
+        ensureChannels(c);
+        Sched.Cfg a = find(c, id);
+        String title = a == null ? (TEST_ID.equals(id) ? "تجربة المنبّه" : "المنبّه") : titleOf(a);
+        Intent st = new Intent(c, AlarmReceiver.class).setAction(ACT_STOP).putExtra("id", id).putExtra("date", date);
+        PendingIntent stop = PendingIntent.getBroadcast(c, req(id) + 200000, st, flags());
+        String when = new SimpleDateFormat("HH:mm", Locale.US).format(new Date(at));
+        Notification.Builder b = builder(c, CH_PRE).setSmallIcon(icon(c)).setContentTitle(title)
+                .setContentText("مؤجَّل — يرنّ مجدداً " + when)
+                .setWhen(at).setShowWhen(true).setUsesChronometer(true).setChronometerCountDown(true)
+                .setOngoing(false).setAutoCancel(false).setOnlyAlertOnce(true).setCategory(Notification.CATEGORY_ALARM)
+                .setVisibility(Notification.VISIBILITY_PRIVATE).setPublicVersion(publicVersion(c, CH_PRE))
+                .setContentIntent(openPi(c, id, date)).addAction(0, "إيقاف", stop);
+        nm(c).notify(notifId(id), b.build());
+    }
+
+    /** يعيد جدولة التأجيلات المعلّقة (بعد إعادة التشغيل أو تعديل الإعدادات). */
+    static boolean rearmSnoozes(Context c, String onlyId) {
+        boolean any = false;
+        long now = System.currentTimeMillis();
+        SharedPreferences p = sp(c);
+        for (java.util.Map.Entry<String, ?> en : new java.util.HashMap<String, Object>(p.getAll()).entrySet()) {
+            String k = en.getKey();
+            if (!k.startsWith("snz:") || !(en.getValue() instanceof String)) continue;
+            String id = k.substring(4);
+            if (onlyId != null && !onlyId.equals(id)) continue;
+            String[] f = ((String) en.getValue()).split("\\|");
+            try {
+                long at = Long.parseLong(f[1]), main = f.length > 2 ? Long.parseLong(f[2]) : at;
+                if (at > now) { armSnooze(c, id, f[0], at, main); if (onlyId != null) any = true; }
+                else p.edit().remove(k).apply();
+            } catch (Exception e) { p.edit().remove(k).apply(); }
+        }
+        return any;
+    }
+
+    static boolean snoozed(Context c, String id) {
+        String v = sp(c).getString("snz:" + id, "");
+        if (v.length() == 0) return false;
+        try { return Long.parseLong(v.split("\\|")[1]) > System.currentTimeMillis(); } catch (Exception e) { return false; }
+    }
+
     static void setDone(Context c, String id, String date, boolean done) {
         SharedPreferences.Editor ed = sp(c).edit();
         if (done) ed.putString("done:" + id, date);
         else if (date.equals(sp(c).getString("done:" + id, ""))) ed.remove("done:" + id);
         ed.apply();
-        if (done) { stopRing(c); nm(c).cancel(notifId(id)); log(c, "DONE " + id + " " + date); }
+        if (done) { cancelSnooze(c, id); stopRing(c); nm(c).cancel(notifId(id)); log(c, "DONE " + id + " " + date); }
         scheduleAll(c);
     }
 
     /** إيقاف تكرار منبه ليوم معيّن وإزالة إشعاره. */
     static void stopToday(Context c, String id, String date) {
         sp(c).edit().putString("stop:" + id, date).apply();
+        cancelSnooze(c, id);
         stopRing(c);
         nm(c).cancel(notifId(id));
         log(c, "STOP " + id + " " + date);
@@ -152,6 +242,8 @@ final class AlarmEngine {
         String id = in.getStringExtra("id"), date = in.getStringExtra("date");
         if (id == null) return;
         log(c, "FIRE id=" + id + " type=" + in.getIntExtra("type", -1) + " date=" + date);
+        if (ACT_STOP.equals(in.getAction())) { stopToday(c, id, date == null ? "" : date); return; }
+        if (in.getIntExtra("type", -1) == Sched.SNOOZE) sp(c).edit().remove("snz:" + id).apply();
         if (TEST_ID.equals(id)) {
             Sched.Cfg t = new Sched.Cfg();
             t.id = id; t.title = "تجربة المنبّه";
@@ -160,7 +252,6 @@ final class AlarmEngine {
             ring(c, t, e);
             return;
         }
-        if (ACT_STOP.equals(in.getAction())) { stopToday(c, id, date == null ? "" : date); return; }
         Sched.Cfg a = find(c, id);
         if (a == null || !a.on) return;
         int type = in.getIntExtra("type", Sched.MAIN);
@@ -250,7 +341,20 @@ final class AlarmEngine {
     }
 
     /** يرنّ كالساعة: خدمة تشغّل نغمة المنبّه في حلقة (حتى يوقفها المستخدم أو تنتهي المدة). وعند فشلها نعود لصوت الإشعار. */
+    /** يوقظ الشاشة عند الرنين (مستقلاً عن إذن الإشعار بملء الشاشة). */
+    @SuppressWarnings("deprecation")
+    static void wake(Context c) {
+        try {
+            PowerManager pm = (PowerManager) c.getSystemService(Context.POWER_SERVICE);
+            if (pm == null) return;
+            PowerManager.WakeLock wl = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE, "jadawli:alarm");
+            wl.acquire(15000);
+            log(c, "WAKE screen");
+        } catch (Throwable t) { log(c, "WAKE failed: " + t); }
+    }
+
     static void ring(Context c, Sched.Cfg a, Sched.Ev e) {
+        wake(c);
         Intent i = new Intent(c, AlarmService.class).putExtra("id", a.id).putExtra("title", a.title).putExtra("label", a.label)
                 .putExtra("pre", a.pre).putExtra("post", a.post).putExtra("full", a.full)
                 .putExtra("date", e.date).putExtra("main", e.main).putExtra("type", e.type).putExtra("idx", e.idx).putExtra("secs", RING_SECS);
@@ -262,6 +366,13 @@ final class AlarmEngine {
             log(c, "RING service failed: " + ex);
             try { nm(c).notify(notifId(a.id), buildAlert(c, a, e, 2)); } catch (Exception x) { log(c, "NOTIFY failed: " + x); }
         }
+    }
+
+    /** يكتم الصوت ويُبقي إشعار الرنين ظاهراً (تفصله الخدمة عن نفسها قبل أن تتوقف). */
+    static void silenceRing(Context c) {
+        if (!AlarmService.running) return;
+        try { c.startService(new Intent(c, AlarmService.class).putExtra("silence", true)); }
+        catch (Exception e) { stopRing(c); }
     }
 
     static void stopRing(Context c) {

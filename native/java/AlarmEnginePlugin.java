@@ -42,6 +42,14 @@ public class AlarmEnginePlugin extends Plugin {
         call.resolve();
     }
 
+    /** تأجيل المنبّه («لاحقاً») minutes دقيقة. */
+    @PluginMethod
+    public void snooze(PluginCall call) {
+        Integer m = call.getInt("minutes", AlarmEngine.SNOOZE_DEFAULT);
+        AlarmEngine.snooze(getContext(), call.getString("id", ""), call.getString("date", ""), m == null ? AlarmEngine.SNOOZE_DEFAULT : m);
+        call.resolve();
+    }
+
     /** تنبيه تجريبي بعد seconds ثانية. */
     @PluginMethod
     public void test(PluginCall call) {
@@ -134,9 +142,15 @@ public class AlarmEnginePlugin extends Plugin {
     }
 
     /** يوقف الصوت فقط (عند فتح شاشة التنبيه) ويُبقي الإشعار. */
+    /** يوقف الصوت فقط؛ ثم يُعاد إشعار المنبّه الجاري (بلا صوت) ليبقى ظاهراً بعد «لاحقاً». */
     @PluginMethod
     public void silence(PluginCall call) {
-        AlarmEngine.stopRing(getContext());
+        final Context c = getContext();
+        AlarmEngine.silenceRing(c);
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+            @Override
+            public void run() { AlarmEngine.scheduleAll(c); }
+        }, 400);
         call.resolve();
     }
 

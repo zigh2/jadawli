@@ -8,7 +8,7 @@ import java.util.TimeZone;
 
 /** منطق جدولة المنبهات فقط (بلا أي اعتماد على أندرويد) ليمكن اختباره على الحاسوب. */
 final class Sched {
-    static final int PRE = 0, MAIN = 1, REP = 2, END = 3;
+    static final int PRE = 0, MAIN = 1, REP = 2, END = 3, SNOOZE = 4;
 
     static final class Cfg {
         String id = "", title = "", label = "";
@@ -89,6 +89,9 @@ final class Sched {
                 if (e.at <= now && (best == null || e.at > best.at)) best = e;
             }
         }
-        return (best == null || best.type == END) ? null : best;
+        if (best == null || best.type == END) return null;
+        boolean windowed = a.pre > 0 || a.post > 0 || (a.rep > 0 && a.cnt > 0);
+        if (!windowed && now - best.at > 3600000L) return null;       // منبه عادي: يُستعاد ساعة واحدة فقط
+        return best;
     }
 }

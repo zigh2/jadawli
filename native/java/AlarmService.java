@@ -35,6 +35,17 @@ public class AlarmService extends Service {
     @Override
     public int onStartCommand(Intent in, int flags, int startId) {
         if (in == null) { stopSelf(); return START_NOT_STICKY; }
+        if (in.getBooleanExtra("silence", false)) {          // كتم: نفصل الإشعار قبل التوقف كي لا يُحذف مع الخدمة
+            handler.removeCallbacks(stopper);
+            stopSound();
+            try {
+                if (Build.VERSION.SDK_INT >= 33) stopForeground(Service.STOP_FOREGROUND_DETACH);
+                else stopForeground(false);
+            } catch (Exception e) { /* لا شيء */ }
+            running = false;
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         Sched.Cfg a = new Sched.Cfg();
         a.id = in.getStringExtra("id") == null ? "" : in.getStringExtra("id");
         a.title = in.getStringExtra("title") == null ? "" : in.getStringExtra("title");

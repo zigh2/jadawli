@@ -12,6 +12,8 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(AlarmEnginePlugin.class);
+        Intent first = getIntent();
+        if (first != null && first.hasExtra("alarm_id")) overLock(true);   // قبل ظهور النافذة كي يظهر فوق القفل
         super.onCreate(savedInstanceState);
     }
 
@@ -30,6 +32,8 @@ public class MainActivity extends BridgeActivity {
 
     /** يسمح بعرض شاشة التنبيه فوق شاشة القفل (وتشغيل الشاشة)، ويُلغى عند الانتهاء. */
     void overLock(boolean on) {
+        if (on) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (Build.VERSION.SDK_INT >= 27) {
             setShowWhenLocked(on);
             setTurnScreenOn(on);

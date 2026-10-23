@@ -1,13 +1,17 @@
 // جداولي — خادم المزامنة (Google Apps Script)
-// 1) غيّر كلمة السر في السطر التالي (نفس الكلمة تُكتب في التطبيق).
-var TOKEN = 'ضع-كلمة-سر-طويلة-هنا';
+// كلمة السر أدرجها التطبيق تلقائياً عند نسخ الكود؛ لا تغيّر شيئاً.
+var TOKEN = '__TOKEN__';
 var SHEET = 'records';
 
 /* ===== منطق الدمج (دالة نقية بلا اعتماد على Google): الأحدث يفوز لكل سجل ===== */
+var CH = 45000;               // الحد الأقصى لخلية في Google Sheets هو 50000 حرف، فيُقسَّم النص الطويل على عدة أعمدة
+var NCOL = 10;                // type, key, json(الجزء الأول), u, su, ثم 5 أجزاء متابعة
+var MAXJSON = CH * 6;
 function jdMerge(state, req, now) {
-  var changed = [];
+  var changed = [], skipped = 0;
   (req.records || []).forEach(function (r) {
     if (!r || !r.type || !r.key) return;
+    if (String(r.json == null ? '' : r.json).length > MAXJSON) { skipped++; return; }
     var id = r.type + '|' + r.key, cur = state[id];
     if (!cur || Number(r.u) > Number(cur.u)) {
       var rec = { type: r.type, key: r.key, json: r.json, u: Number(r.u) || 0, su: now };
@@ -20,7 +24,7 @@ function jdMerge(state, req, now) {
     var s = state[id];
     if (s.su > since) out.push({ type: s.type, key: s.key, json: s.json, u: s.u, su: s.su });
   });
-  return { body: { ok: true, now: now, records: out }, changed: changed };
+  return { body: { ok: true, now: now, records: out, skipped: skipped }, changed: changed };
 }
 
 /* ===== واجهة Google ===== */
@@ -30,8 +34,8 @@ function doPost(e) {
   try {
     var req = JSON.parse(e.postData.contents);
     if (req.token !== TOKEN) return jdOut({ ok: false, error: 'bad-token' });
-    var sh = jdSheet(), state = jdLoad(sh), res = jdMerge(state, req, Date.now());
-    jdSave(sh, res.changed);
+    var sh = jdSheet(), v = sh.getDataRange().getValues(), state = jdLoad(v), res = jdMerge(state, req, Date.now());
+    jdSave(sh, v, res.changed);
     return jdOut(res.body);
   } catch (err) {
     return jdOut({ ok: false, error: String(err) });
@@ -42,26 +46,42 @@ function doPost(e) {
 function doGet() { return jdOut({ ok: true, name: 'jadawli-sync' }); }
 function jdOut(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
 function jdSheet() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet(), sh = ss.getSheetByName(SHEET);
+  // مشروع مستقل: ينشئ جدول بيانات خاصاً بك في Drive أول مرة ويتذكره
+  var props = PropertiesService.getScriptProperties(), id = props.getProperty('SSID'), ss = null;
+  if (id) { try { ss = SpreadsheetApp.openById(id); } catch (e) { ss = null; } }
+  if (!ss) { ss = SpreadsheetApp.create('جداولي - مزامنة'); props.setProperty('SSID', ss.getId()); }
+  var sh = ss.getSheetByName(SHEET);
   if (!sh) { sh = ss.insertSheet(SHEET); sh.appendRow(['type', 'key', 'json', 'u', 'su']); sh.setFrozenRows(1); }
   return sh;
 }
-function jdLoad(sh) {
-  var v = sh.getDataRange().getValues(), st = {};
+function jdLoad(v) {
+  var st = {};
   for (var i = 1; i < v.length; i++) {
     var r = v[i];
-    if (r[0]) st[r[0] + '|' + r[1]] = { type: String(r[0]), key: String(r[1]), json: String(r[2]), u: Number(r[3]), su: Number(r[4]) };
+    if (!r[0]) continue;
+    var json = String(r[2]);
+    for (var k = 5; k < NCOL; k++) if (r[k] !== undefined && r[k] !== '') json += String(r[k]).substr(1);   // الأجزاء اللاحقة تبدأ بعلامة ~
+    st[r[0] + '|' + r[1]] = { type: String(r[0]), key: String(r[1]), json: json, u: Number(r[3]), su: Number(r[4]) };
   }
   return st;
 }
-function jdSave(sh, changed) {
+function jdPack(c) {
+  var j = String(c.json == null ? '' : c.json), row = [c.type, c.key, j.substr(0, CH), c.u, c.su];
+  for (var i = 1; i < 6; i++) { var part = j.substr(i * CH, CH); row.push(part ? '~' + part : ''); }
+  return row;
+}
+function jdPad(r) { var o = r.slice(0, NCOL); while (o.length < NCOL) o.push(''); return o; }
+/* كتابة واحدة بدل استدعاء لكل سجل: من أول صف تغيّر حتى النهاية */
+function jdSave(sh, v, changed) {
   if (!changed.length) return;
-  var v = sh.getDataRange().getValues(), idx = {}, add = [];
-  for (var i = 1; i < v.length; i++) idx[v[i][0] + '|' + v[i][1]] = i + 1;
+  var rows = [], idx = {}, i;
+  for (i = 1; i < v.length; i++) { rows.push(jdPad(v[i])); idx[v[i][0] + '|' + v[i][1]] = rows.length - 1; }
+  var first = rows.length;
   changed.forEach(function (c) {
-    var row = idx[c.type + '|' + c.key];
-    if (row) sh.getRange(row, 1, 1, 5).setValues([[c.type, c.key, c.json, c.u, c.su]]);
-    else add.push([c.type, c.key, c.json, c.u, c.su]);
+    var k = c.type + '|' + c.key, p = jdPack(c);
+    if (idx[k] !== undefined) { rows[idx[k]] = p; if (idx[k] < first) first = idx[k]; }
+    else { rows.push(p); idx[k] = rows.length - 1; }
   });
-  if (add.length) sh.getRange(sh.getLastRow() + 1, 1, add.length, 5).setValues(add);
+  var out = rows.slice(first);
+  sh.getRange(first + 2, 1, out.length, NCOL).setValues(out);
 }

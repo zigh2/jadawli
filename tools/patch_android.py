@@ -31,6 +31,8 @@ for d, _, files in os.walk(os.path.join(src, 'res')):
 
 # 3) المانيفست
 x = open(mf, encoding='utf8').read()
+# منع النسخ الاحتياطي التلقائي/adb لبيانات التطبيق (له نسخته المشفّرة الخاصة)
+x = x.replace('android:allowBackup="true"', 'android:allowBackup="false"')
 if 'LauncherNormal' in x:
     print('المانيفست مُعدَّل مسبقاً'); sys.exit(0)
 

@@ -41,6 +41,10 @@ final class SchedTest {
         r = Sched.active(f, t(2026, 10, 9, 6, 0), TZ); ok(r == null, "استعادة بعد النهاية: لا شيء");
         f.done = "2026-10-09"; ok(Sched.active(f, t(2026, 10, 9, 4, 15), TZ) == null, "استعادة: لا شيء إن سُجِّل اليوم");
         f.done = ""; f.stop = "2026-10-09"; ok(Sched.active(f, t(2026, 10, 9, 4, 45), TZ) == null, "استعادة: لا شيء إن أُوقف اليوم");
+        // منبه عادي: يُستعاد ساعة واحدة فقط بعد موعده
+        Sched.Cfg pl = new Sched.Cfg(); pl.id = "pl"; pl.hour = 7; pl.minute = 0;
+        r = Sched.active(pl, t(2026, 10, 9, 7, 30), TZ); ok(r != null && r.type == Sched.MAIN, "plain alarm restored 30 min after its time");
+        r = Sched.active(pl, t(2026, 10, 9, 8, 30), TZ); ok(r == null, "plain alarm not restored after 1 hour");
         // منطقة زمنية مختلفة
         TimeZone cairo = TimeZone.getTimeZone("Africa/Cairo"); Sched.Cfg c = fajr();
         Calendar cc = Calendar.getInstance(cairo); cc.clear(); cc.set(2026, 9, 9, 3, 0, 0);
