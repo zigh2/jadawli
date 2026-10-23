@@ -6,7 +6,11 @@ on:
     branches: [main, master]
 
 permissions:
-  contents: read
+  contents: write      # لازم كي يحفظ البناء المشروع المستخرج من الملف المضغوط في المستودع
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
 
 jobs:
   apk:
@@ -14,20 +18,92 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # رفع ملف .zip إلى مجلد incoming يستبدل المشروع كله ثم يُبنى التطبيق.
+      # (مجلدا .github و incoming لا يتأثران، فتعديل ملف البناء نفسه يتم يدوياً.)
+      - name: Import project from incoming zip (if any)
+        run: |
+          shopt -s nullglob
+          zips=(incoming/*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then
+            echo "لا يوجد ملف zip في incoming — سيُبنى المشروع الحالي في المستودع."
+            exit 0
+          fi
+          z="${zips[${#zips[@]}-1]}"
+          echo "استيراد: $z"
+          rm -rf "$RUNNER_TEMP/imp" && mkdir -p "$RUNNER_TEMP/imp"
+          unzip -q "$z" -d "$RUNNER_TEMP/imp"
+          pkg=$(find "$RUNNER_TEMP/imp" -name package.json -not -path '*/node_modules/*' | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
+          if [ -z "$pkg" ] || [ ! -d "$(dirname "$pkg")/www" ]; then
+            echo "::error::الملف المضغوط لا يحوي مشروع جداولي (لم أجد package.json بجانب مجلد www)."
+            exit 1
+          fi
+          root=$(dirname "$pkg")
+          # حذف كل ما في المستودع ما عدا .git و .github و incoming، ثم نسخ المشروع الجديد
+          find . -mindepth 1 -maxdepth 1 ! -name .git ! -name .github ! -name incoming -exec rm -rf {} +
+          for f in "$root"/* "$root"/.[!.]*; do
+            case "$(basename "$f")" in .git|.github|incoming) continue ;; esac
+            cp -a "$f" ./
+          done
+          rm -f incoming/*.zip
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "تحديث المشروع من $(basename "$z")" || echo "لا تغييرات في الملفات"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm            # يخزّن تنزيلات npm فلا تُعاد في كل بناء
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 21
 
+      # تخزين مؤقت لتنزيلات Gradle (المكتبات وأداة Gradle نفسها)
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-cap8-${{ hashFiles('package-lock.json') }}
+          restore-keys: gradle-cap8-
+
+      # مفتاح التوقيع محفوظ في Secrets وليس في المستودع
+      - name: Check signing secrets
+        env:
+          KS: ${{ secrets.KEYSTORE_BASE64 }}
+          SP: ${{ secrets.KEYSTORE_PASSWORD }}
+          KA: ${{ secrets.KEY_ALIAS }}
+          KP: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KS" ] || [ -z "$SP" ] || [ -z "$KA" ] || [ -z "$KP" ]; then
+            echo "::error::أسرار التوقيع ناقصة. أضف في Settings > Secrets and variables > Actions: KEYSTORE_BASE64 و KEYSTORE_PASSWORD و KEY_ALIAS و KEY_PASSWORD (الشرح في README)."
+            exit 1
+          fi
+          echo "$KS" | base64 -d > "$RUNNER_TEMP/jd.keystore"
+          echo "JD_KEYSTORE=$RUNNER_TEMP/jd.keystore" >> "$GITHUB_ENV"
+          echo "JD_STORE_PASS=$SP" >> "$GITHUB_ENV"
+          echo "JD_KEY_ALIAS=$KA" >> "$GITHUB_ENV"
+          echo "JD_KEY_PASS=$KP" >> "$GITHUB_ENV"
+
       - name: Install dependencies
-        run: npm install
+        run: npm ci --no-audit --no-fund
+
+      - name: Set version (v<major>.<minor>-<date>)
+        id: ver
+        run: |
+          python3 tools/set_version.py web | tee /tmp/ver.txt
+          echo "name=$(cut -d' ' -f1 /tmp/ver.txt)" >> "$GITHUB_OUTPUT"
+          echo "code=$(cut -d' ' -f2 /tmp/ver.txt)" >> "$GITHUB_OUTPUT"
 
       - name: Add Android platform
         run: npx cap add android
+
+      # نسخة Gradle الثنائية أصغر بكثير من نسخة -all (بلا مصادر ووثائق)
+      - name: Use smaller Gradle distribution
+        run: sed -i 's/-all\.zip/-bin.zip/' android/gradle/wrapper/gradle-wrapper.properties
 
       - name: Generate icons and splash screens
         run: npx capacitor-assets generate --android
@@ -36,54 +112,51 @@ jobs:
       - name: Sync web files into the Android project
         run: npx cap sync android
 
-      # مفتاح توقيع ثابت: يسمح بتثبيت كل نسخة جديدة فوق السابقة دون حذف البيانات
-      - name: Use fixed signing key
-        run: |
-          mkdir -p ~/.android
-          cp keystore/debug.keystore ~/.android/debug.keystore
-
-      # 1) النسخة الآمنة: ميزات الويب فقط (بلا كود المنبهات الأصلي). تُبنى دائماً.
-      - name: Build SAFE APK (web features only)
-        working-directory: android
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
-          mkdir -p ../out
-          cp app/build/outputs/apk/debug/app-debug.apk ../out/jadawli-safe.apk
-
-      # 2) النسخة الكاملة: تضيف محرك المنبهات الأصلي. إن فشلت تبقى الآمنة متاحة مع سجل الخطأ.
       - name: Add native alarm engine
-        id: native
-        continue-on-error: true
         run: |
           set -o pipefail
           mkdir -p out
           python3 tools/patch_android.py 2>&1 | tee out/patch.log
 
-      - name: Build FULL APK (with alarms)
-        id: full
-        if: steps.native.outcome == 'success'
-        continue-on-error: true
+      - name: Apply version and signing to Android project
+        run: |
+          python3 tools/set_version.py gradle
+          python3 tools/patch_signing.py
+
+      - name: Build APK
         working-directory: android
         run: |
           set -o pipefail
-          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee ../out/full-build.log
-          cp app/build/outputs/apk/debug/app-debug.apk ../out/jadawli-full.apk
+          chmod +x gradlew
+          mkdir -p ../out
+          ./gradlew assembleRelease --no-daemon --build-cache --stacktrace 2>&1 | tee ../out/build.log
+          cp app/build/outputs/apk/release/app-release.apk "../out/jadawli-${{ steps.ver.outputs.name }}.apk"
 
-      - name: Report
+      - name: Summary
         if: always()
         run: |
-          if [ -f out/jadawli-full.apk ]; then
-            echo "### ✅ تم بناء النسخة الكاملة (jadawli-full.apk) والنسخة الآمنة (jadawli-safe.apk)" >> "$GITHUB_STEP_SUMMARY"
+          if ls out/*.apk >/dev/null 2>&1; then
+            echo "### ✅ ${{ steps.ver.outputs.name }} (build ${{ steps.ver.outputs.code }})" >> "$GITHUB_STEP_SUMMARY"
+            AS=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | tail -1)
+            if [ -n "$AS" ]; then
+              echo "بصمة التوقيع (يجب أن تبقى نفسها في كل بناء):" >> "$GITHUB_STEP_SUMMARY"
+              "$AS" verify --print-certs out/*.apk 2>&1 | grep -i "SHA-256" | head -1 | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY" || true
+            fi
           else
-            echo "### ⚠️ فشل بناء النسخة الكاملة. النسخة الآمنة (jadawli-safe.apk) جاهزة. أرسل لي محتوى full-build.log أو patch.log" >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning::فشل بناء النسخة الكاملة — النسخة الآمنة متاحة، وراجع ملفات السجل في الـ Artifact"
+            echo "### ❌ فشل البناء — نزّل build-logs وأرسل لي build.log" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Upload APKs and logs
-        if: always()
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: jadawli-apk
-          path: out/*
+          path: out/*.apk
           if-no-files-found: error
+
+      - name: Upload logs (only on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: out/*.log
+          if-no-files-found: ignore
