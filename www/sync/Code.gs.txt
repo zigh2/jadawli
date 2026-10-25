@@ -1,15 +1,30 @@
 // جداولي — خادم المزامنة (Google Apps Script)
-// كلمة السر أدرجها التطبيق تلقائياً عند نسخ الكود؛ لا تغيّر شيئاً.
+// كلمتا السر أدرجهما التطبيق تلقائياً عند نسخ الكود؛ لا تغيّر شيئاً.
+//   TOKEN    : قراءة وكتابة      TOKEN_RO : قراءة فقط
 var TOKEN = '__TOKEN__';
-var SHEET = 'records';
+var TOKEN_RO = '__TOKEN_RO__';
+var SHEET = 'records';        // ورقة النظام المخفية (لا تعدّلها)
+var VERSION = 2;
 
-/* ===== منطق الدمج (دالة نقية بلا اعتماد على Google): الأحدث يفوز لكل سجل ===== */
+/* ===== منطق الدمج والمطابقة (دوال نقية بلا اعتماد على Google) ===== */
 var CH = 45000;               // الحد الأقصى لخلية في Google Sheets هو 50000 حرف، فيُقسَّم النص الطويل على عدة أعمدة
 var NCOL = 10;                // type, key, json(الجزء الأول), u, su, ثم 5 أجزاء متابعة
 var MAXJSON = CH * 6;
-function jdMerge(state, req, now) {
-  var changed = [], skipped = 0;
-  (req.records || []).forEach(function (r) {
+
+function jdParse(s) { try { return JSON.parse(s); } catch (e) { return null; } }
+
+/* uid الجدول الذي يخصّه سجل (أو null للملاحظات العامة) */
+function jdUidOf(rec) {
+  if (rec.type === 'table') return rec.key;
+  var k = jdParse(rec.key);
+  if (rec.type === 'cell') return k && k[0];
+  if (rec.type === 'note') return k && k.length === 3 ? k[1] : null;
+  return null;
+}
+
+function jdMerge(state, req, now, role) {
+  var changed = [], skipped = 0, canWrite = role !== 'ro';
+  (canWrite ? (req.records || []) : []).forEach(function (r) {
     if (!r || !r.type || !r.key) return;
     if (String(r.json == null ? '' : r.json).length > MAXJSON) { skipped++; return; }
     var id = r.type + '|' + r.key, cur = state[id];
@@ -19,12 +34,101 @@ function jdMerge(state, req, now) {
       changed.push(rec);
     }
   });
-  var since = Number(req.since) || 0, out = [];
+  return { changed: changed, skipped: skipped };
+}
+
+/* ما يُرسل لجهاز: السجلات الأحدث من since للجداول التي يشترك بها فقط (want)، وكل سجلات الجداول الجديدة (fresh) */
+function jdSelect(state, req, now, role, skipped) {
+  var since = Number(req.since) || 0, want = req.want, fresh = {}, wantSet = null, out = [], catalog = [];
+  (req.fresh || []).forEach(function (u) { fresh[u] = 1; });
+  if (want) { wantSet = {}; want.forEach(function (u) { wantSet[u] = 1; }); }
+  Object.keys(state).forEach(function (id) {
+    var s = state[id], uid = jdUidOf(s);
+    if (s.type === 'table') {
+      var def = jdParse(s.json);
+      if (def && !def.deleted) catalog.push({ uid: s.key, title: def.title, isTemplate: !!def.isTemplate, u: s.u });
+    }
+    if (uid) { if (wantSet && !wantSet[uid] && !fresh[uid]) return; }
+    else if (s.type === 'note' && wantSet && !req.notes) return;
+    if (s.su > since || (uid && fresh[uid])) out.push({ type: s.type, key: s.key, json: s.json, u: s.u, su: s.su });
+  });
+  return { ok: true, v: VERSION, role: role || 'rw', now: now, records: out, catalog: catalog, skipped: skipped || 0 };
+}
+
+/* بناء جدول مفهرس من الحالة: { uid: { def, cells: {سطر: {عمود: قيمة}} } } */
+function jdTables(state) {
+  var T = {};
   Object.keys(state).forEach(function (id) {
     var s = state[id];
-    if (s.su > since) out.push({ type: s.type, key: s.key, json: s.json, u: s.u, su: s.su });
+    if (s.type !== 'table') return;
+    var def = jdParse(s.json);
+    if (def && !def.deleted) T[s.key] = { def: def, cells: {} };
   });
-  return { body: { ok: true, now: now, records: out, skipped: skipped }, changed: changed };
+  Object.keys(state).forEach(function (id) {
+    var s = state[id];
+    if (s.type !== 'cell') return;
+    var k = jdParse(s.key), t = k && T[k[0]];
+    if (!t) return;
+    var j = jdParse(s.json), v = j && j.v != null ? String(j.v) : '';
+    (t.cells[k[1]] = t.cells[k[1]] || {})[k[2]] = v;
+  });
+  return T;
+}
+
+/* الأعمدة الظاهرة في جدول غوغل: كل الأعمدة غير المفتاحية (المفتاحية تُشتق من اسم السطر) */
+function jdVisibleCols(def) {
+  var keys = def.keyCols || [];
+  return (def.columns || []).filter(function (c) { return keys.indexOf(c.name) < 0; });
+}
+var KEYHEAD = 'السطر';
+
+/* شكل الجدول كما يُكتب في Google Sheets */
+function jdView(t) {
+  var cols = jdVisibleCols(t.def), header = [KEYHEAD].concat(cols.map(function (c) { return c.name; })), rows = [];
+  (t.def.rows || []).forEach(function (r) {
+    var cs = t.cells[r] || {};
+    rows.push([r].concat(cols.map(function (c) {
+      var v = cs[c.name] == null ? '' : cs[c.name];
+      return c.type === 'checkbox' ? v === '1' : v;
+    })));
+  });
+  return { header: header, rows: rows, cols: cols };
+}
+
+/* مطابقة ما كُتب يدوياً في Google Sheets مع السجلات: values = { uid: مصفوفة قيم (نصوص/منطقية) } */
+function jdReconcile(state, sheets, now, skipUids) {
+  var T = jdTables(state), changed = [];
+  Object.keys(sheets).forEach(function (uid) {
+    var t = T[uid], V = sheets[uid];
+    if (!t || !V || !V.length || (skipUids && skipUids[uid])) return;
+    var head = V[0].map(function (x) { return String(x); }), colIdx = {}, known = {}, newRows = [];
+    jdVisibleCols(t.def).forEach(function (c) { var i = head.indexOf(c.name); if (i > 0) colIdx[c.name] = i; });
+    (t.def.rows || []).forEach(function (r) { known[r] = 1; });
+    for (var i = 1; i < V.length; i++) {
+      var r = String(V[i][0] == null ? '' : V[i][0]).trim();
+      if (!r) continue;
+      if (!known[r]) { known[r] = 1; newRows.push(r); }
+      jdVisibleCols(t.def).forEach(function (c) {
+        var ci = colIdx[c.name];
+        if (ci === undefined) return;
+        var raw = V[i][ci], nv;
+        if (c.type === 'checkbox') nv = (raw === true || String(raw).toUpperCase() === 'TRUE' || String(raw) === '1') ? '1' : '';
+        else nv = raw == null ? '' : String(raw);
+        var cur = (t.cells[r] || {})[c.name]; cur = cur == null ? '' : cur;
+        if (nv !== cur) {
+          var rec = { type: 'cell', key: JSON.stringify([uid, r, c.name]), json: JSON.stringify({ v: nv }), u: now, su: now };
+          state['cell|' + rec.key] = rec; changed.push(rec);
+          (t.cells[r] = t.cells[r] || {})[c.name] = nv;
+        }
+      });
+    }
+    if (newRows.length) {          // أسطر أُضيفت يدوياً في Google Sheets تدخل في تعريف الجدول
+      t.def.rows = (t.def.rows || []).concat(newRows);
+      var d = { type: 'table', key: uid, json: JSON.stringify(t.def), u: now, su: now };
+      state['table|' + uid] = d; changed.push(d);
+    }
+  });
+  return changed;
 }
 
 /* ===== واجهة Google ===== */
@@ -32,28 +136,117 @@ function doPost(e) {
   var lock = LockService.getScriptLock();
   lock.waitLock(25000);
   try {
-    var req = JSON.parse(e.postData.contents);
-    if (req.token !== TOKEN) return jdOut({ ok: false, error: 'bad-token' });
-    var sh = jdSheet(), v = sh.getDataRange().getValues(), state = jdLoad(v), res = jdMerge(state, req, Date.now());
-    jdSave(sh, v, res.changed);
-    return jdOut(res.body);
+    var req = JSON.parse(e.postData.contents), role = req.token === TOKEN ? 'rw' : (req.token === TOKEN_RO ? 'ro' : null);
+    if (!role) return jdOut({ ok: false, error: 'bad-token' });
+    var ss = jdSS(), sh = jdRecords(ss), v = sh.getDataRange().getValues(), state = jdLoad(v), now = Date.now();
+    var dirty = jdDirty();
+    var fromSheets = jdReconcile(state, jdReadSheets(ss), now, dirty);          // تعديلات أُجريت يدوياً في Google Sheets
+    var m = jdMerge(state, req, now, role);                                      // تعديلات الأجهزة (للأجهزة المصرّح لها بالكتابة فقط)
+    var all = fromSheets.concat(m.changed);
+    jdSave(sh, v, all);
+    jdMirror(ss, state, all, dirty);                                             // تحديث جداول غوغل المطابقة
+    var body = jdSelect(state, req, now, role, m.skipped);
+    body.sheetUrl = ss.getUrl();
+    return jdOut(body);
   } catch (err) {
     return jdOut({ ok: false, error: String(err) });
   } finally {
     lock.releaseLock();
   }
 }
-function doGet() { return jdOut({ ok: true, name: 'jadawli-sync' }); }
+function doGet() { return jdOut({ ok: true, name: 'jadawli-sync', v: VERSION }); }
 function jdOut(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
-function jdSheet() {
+function jdSS() {
   // مشروع مستقل: ينشئ جدول بيانات خاصاً بك في Drive أول مرة ويتذكره
   var props = PropertiesService.getScriptProperties(), id = props.getProperty('SSID'), ss = null;
   if (id) { try { ss = SpreadsheetApp.openById(id); } catch (e) { ss = null; } }
   if (!ss) { ss = SpreadsheetApp.create('جداولي - مزامنة'); props.setProperty('SSID', ss.getId()); }
+  return ss;
+}
+function jdRecords(ss) {
   var sh = ss.getSheetByName(SHEET);
-  if (!sh) { sh = ss.insertSheet(SHEET); sh.appendRow(['type', 'key', 'json', 'u', 'su']); sh.setFrozenRows(1); }
+  if (!sh) { sh = ss.insertSheet(SHEET); sh.appendRow(['type', 'key', 'json', 'u', 'su']); sh.setFrozenRows(1); sh.hideSheet(); }
   return sh;
 }
+/* جداول لم تُكتب في غوغل بنجاح بعد: نتجنّب اعتبار محتواها القديم تعديلاً يدوياً */
+function jdDirty() { try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('DIRTY') || '{}'); } catch (e) { return {}; } }
+function jdSetDirty(d) { PropertiesService.getScriptProperties().setProperty('DIRTY', JSON.stringify(d)); }
+
+/* الورقة المرتبطة بجدول: تُعرف بوسم مخفي حتى لو أعاد المستخدم تسميتها */
+function jdSheetOf(ss, uid) {
+  var sheets = ss.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    var md = sheets[i].getDeveloperMetadata();
+    for (var k = 0; k < md.length; k++) if (md[k].getKey() === 'jd_uid' && md[k].getValue() === uid) return sheets[i];
+  }
+  return null;
+}
+function jdReadSheets(ss) {
+  var out = {}, sheets = ss.getSheets(), tz = ss.getSpreadsheetTimeZone();
+  sheets.forEach(function (sh) {
+    var uid = null, md = sh.getDeveloperMetadata();
+    for (var k = 0; k < md.length; k++) if (md[k].getKey() === 'jd_uid') uid = md[k].getValue();
+    if (!uid || sh.getLastRow() < 1 || sh.getLastColumn() < 1) return;
+    out[uid] = sh.getDataRange().getValues().map(function (row) {
+      return row.map(function (x) {
+        if (x instanceof Date) return Utilities.formatDate(x, tz, x.getFullYear() < 1950 ? 'HH:mm' : 'yyyy-MM-dd');   // وقت فقط أو تاريخ
+        return x;
+      });
+    });
+  });
+  return out;
+}
+function jdSafeName(ss, title, uid, isTpl) {
+  var base = ((isTpl ? 'قالب - ' : '') + String(title || 'جدول')).replace(/[\[\]\*\?:\/\\]/g, ' ').replace(/^'+/, '').trim().substr(0, 90) || 'جدول';
+  var name = base, n = 2, cur = jdSheetOf(ss, uid);
+  for (;;) {
+    var ex = ss.getSheetByName(name);
+    if (!ex || (cur && ex.getSheetId() === cur.getSheetId())) return name;
+    name = base + ' (' + (n++) + ')';
+  }
+}
+function jdMirror(ss, state, changed, dirty) {
+  var T = jdTables(state), want = {}, gone = {};
+  changed.forEach(function (c) {
+    if (c.type === 'table') { var d = jdParse(c.json); if (d && d.deleted) gone[c.key] = 1; else want[c.key] = 1; }
+    else { var uid = jdUidOf(c); if (uid) want[uid] = 1; }
+  });
+  Object.keys(T).forEach(function (uid) { if (!jdSheetOf(ss, uid)) want[uid] = 1; });   // أنشئ ما نقص (أو حُذف يدوياً)
+  Object.keys(gone).forEach(function (uid) { var sh = jdSheetOf(ss, uid); if (sh && ss.getSheets().length > 1) ss.deleteSheet(sh); });
+  Object.keys(want).forEach(function (uid) {
+    if (!T[uid]) return;
+    dirty[uid] = 1; jdSetDirty(dirty);
+    try { jdWriteSheet(ss, uid, T[uid]); delete dirty[uid]; jdSetDirty(dirty); } catch (e) { /* يبقى معلَّماً ويُعاد لاحقاً */ }
+  });
+}
+function jdWriteSheet(ss, uid, t) {
+  var view = jdView(t), sh = jdSheetOf(ss, uid), name = jdSafeName(ss, t.def.title, uid, t.def.isTemplate);
+  if (!sh) { sh = ss.insertSheet(name); sh.addDeveloperMetadata('jd_uid', uid); }
+  else if (sh.getName() !== name) sh.setName(name);
+  var nr = view.rows.length + 1, nc = view.header.length;
+  sh.clear(); sh.clearConditionalFormatRules();
+  sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).clearDataValidations();
+  if (sh.getMaxRows() < nr + 1) sh.insertRowsAfter(sh.getMaxRows(), nr + 1 - sh.getMaxRows());
+  if (sh.getMaxColumns() < nc) sh.insertColumnsAfter(sh.getMaxColumns(), nc - sh.getMaxColumns());
+  var all = sh.getRange(1, 1, nr, nc);
+  all.setNumberFormat('@');                                      // نص خام كي لا تتحوّل الأوقات والأرقام تلقائياً
+  all.setValues([view.header].concat(view.rows));
+  view.cols.forEach(function (c, i) {
+    var rng = sh.getRange(2, i + 2, Math.max(1, view.rows.length), 1);
+    if (c.type === 'checkbox') { rng.setNumberFormat('General'); rng.insertCheckboxes(); rng.setValues(view.rows.length ? view.rows.map(function (r) { return [r[i + 1]]; }) : [[false]]); }
+    else if (c.type === 'select' && c.options) {
+      var opts = String(c.options).split(/[,،]/).map(function (x) { return x.trim(); }).filter(Boolean);
+      if (opts.length) rng.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opts, true).setAllowInvalid(true).build());
+    }
+  });
+  sh.setRightToLeft(true); sh.setFrozenRows(1); sh.setFrozenColumns(1);
+  sh.getRange(1, 1, 1, nc).setFontWeight('bold').setBackground('#e8eef7');
+  sh.getRange(1, 1, nr, 1).setFontWeight('bold');
+  sh.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function (p) { if (p.getDescription() === 'jadawli') p.remove(); });
+  var p1 = sh.getRange(1, 1, 1, nc).protect().setDescription('jadawli'); p1.setWarningOnly(true);
+  var p2 = sh.getRange(1, 1, nr, 1).protect().setDescription('jadawli'); p2.setWarningOnly(true);
+}
+
 function jdLoad(v) {
   var st = {};
   for (var i = 1; i < v.length; i++) {

@@ -30,21 +30,29 @@ async function readZip(bytes, pass) {
   return JSON.parse(txt);
 }
 
+let askedAuto = false;
 /* auto=true: يعمل بصمت مرة واحدة يومياً وفقط إن تغيّرت البيانات */
 async function run(auto) {
   const a = A(), { S, DB, ymd, toast, native, plug } = a, c = cfg();
-  if (busy) return false;
-  if (!c.pass) { if (!auto) toast('حدّد كلمة سر النسخ الاحتياطي أولاً', true); return false; }
+  if (busy || (auto && !c.on)) return false;      // التلقائي يعمل فقط إن فُعّل
   busy = true;
   try {
     const snap = await snapshot(), mu = maxU(snap), today = ymd(new Date());
     if (auto && (c.lastDate === today || mu <= (c.lastU || 0))) return false;
     if (!snap.tables.length) { if (!auto) toast('لا توجد بيانات لنسخها', true); return false; }
-    const bytes = await makeZip(snap, c.pass), name = `jadawli-backup-${today}.zip`, nat = native ? plug('AlarmEngine') : null;
+    /* كلمة السر لا تُطلب إلا عند إنشاء أول نسخة: يدوياً فوراً، وتلقائياً مرة لكل جلسة وفقط والتطبيق ظاهر */
+    if (!cfg().pass) {
+      if (auto && (askedAuto || document.hidden)) return false;
+      if (auto) askedAuto = true;
+      busy = false;
+      if (!(await setPass())) return false;
+      busy = true;
+    }
+    const pass = cfg().pass, bytes = await makeZip(snap, pass), name = `jadawli-backup-${today}.zip`, nat = native ? plug('AlarmEngine') : null;
     let where = '';
     if (nat) { try { where = (await nat.saveBackup({ name, data: a.b64(bytes), keep: c.keep || 30 })).path; } catch (e) { if (!auto) toast('تعذّر الحفظ في التنزيلات: ' + (e && e.message ? e.message : ''), true); } }
     if (!where) { if (auto) return false; await a.saveFile(name, 'application/zip', bytes); where = 'المشاركة'; }
-    const nc = { ...c, lastDate: today, lastU: mu, lastAt: Date.now(), lastWhere: where };
+    const nc = { ...cfg(), lastDate: today, lastU: mu, lastAt: Date.now(), lastWhere: where };
     S.meta.backup = nc; await DB.setMeta('backup', nc);
     if (!auto) toast('تم النسخ الاحتياطي: ' + where);
     return true;
@@ -89,10 +97,9 @@ function settings({ row, tog, meta }) {
   const file = h('input', { type: 'file', accept: '.zip,application/zip', hidden: true, onchange: async e => { const f = e.target.files[0]; e.target.value = ''; A().S.busy = false; if (f) { await restore(f); A().render('settings'); } } });
   return h('section', { class: 'sec' }, h('h2', {}, 'النسخ الاحتياطي المشفّر'),
     row('نسخ احتياطي يومي تلقائي', tog(!!c.on, async (on, el) => {
-      if (on && !cfg().pass && !(await setPass())) { el.checked = false; return; }
       S.meta.backup = { ...cfg(), on }; await A().DB.setMeta('backup', S.meta.backup); A().render('settings');
-    }), 'عند الخروج من التطبيق مرة واحدة يومياً إن تغيّرت البيانات، في Download/Jadawli/Backup (أندرويد 10+)'),
-    row('كلمة السر', h('button', { class: 'btn sm', onclick: async () => { if (await setPass()) { toast('تم حفظ كلمة السر'); A().render('settings'); } } }, c.pass ? 'تغيير' : 'تعيين')),
+    }), 'عند الخروج من التطبيق مرة واحدة يومياً إن تغيّرت البيانات، في Download/Jadawli/Backup (أندرويد 10+). تُطلب كلمة السر عند إنشاء أول نسخة فقط.'),
+    row('كلمة السر (اختيارية حتى أول نسخة)', h('button', { class: 'btn sm', onclick: async () => { if (await setPass()) { toast('تم حفظ كلمة السر'); A().render('settings'); } } }, c.pass ? 'تغيير' : 'تعيين')),
     row('عدد النسخ المحتفظ بها', h('input', { type: 'number', min: 1, max: 365, value: c.keep || 30, style: 'width:80px;text-align:center', onchange: async e => {
       const n = Math.min(365, Math.max(1, +e.target.value || 30)); S.meta.backup = { ...cfg(), keep: n }; await A().DB.setMeta('backup', S.meta.backup); } }), 'الأقدم تُحذف تلقائياً'),
     row('آخر نسخة', h('b', {}, c.lastAt ? A().ymd(new Date(c.lastAt)) : 'لا يوجد'), c.lastWhere || ''),
