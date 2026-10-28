@@ -1021,7 +1021,6 @@ async function boot() {
   window.addEventListener('alarmLaunch', () => Alarms.checkLaunch());
   document.addEventListener('visibilitychange', () => { if (!document.hidden) Alarms.checkLaunch(); });
   if ((S.meta.tour || 0) < 2 && !locked()) setTimeout(showTour, 700);
-  if ('serviceWorker' in navigator && !native && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 Object.assign(window.App, { fabWake, confirmBox, saveFile, b64, doImport, validBackup, applyTheme, render, S, DB, ymd, DAYS, MONTHS, native, plug, reload, field, orderedCols, baseName });
 window.__app = { PALETTES, applyTheme, showTour, onBack, setZoom, clampZ, S, boot, render, statsFor, toCsv, validBackup, generate, todayIdx, doImport, makeMonth, monthCovered, orderedCols, exportModel, setNote, challenge, removePin, changePin, setPin, checkPin };

@@ -1,8 +1,0 @@
-const C = 'jadawli-v7';
-const FILES = ['./', 'index.html', 'manifest.webmanifest', 'css/fonts.css', 'css/app.css', 'js/sortable.min.js', 'js/db.js', 'js/templates.js', 'js/app.js', 'js/clock.js', 'js/alarms.js', 'js/backup.js', 'js/sync.js', 'js/msgs.js', 'js/colors.js', 'js/tour.js', 'js/version.js', 'js/config.js', 'sync/Code.gs.txt', 'js/vendor/zip.min.js', 'js/pdf.js', 'js/vendor/pdf-lib.min.js', 'js/vendor/fontkit.umd.min.js',
-  ...['arabic-400', 'arabic-700', 'latin-400', 'latin-700'].map(n => `fonts/pdf/tajawal-${n}-normal.woff`),
-  'icons/icon-192.png', 'icons/icon-512.png',
-  ...['arabic', 'latin'].flatMap(s => [400, 500, 700].map(w => `fonts/tajawal-${s}-${w}-normal.woff2`))];
-self.addEventListener('install', e => e.waitUntil(caches.open(C).then(c => c.addAll(FILES)).then(() => self.skipWaiting())));
-self.addEventListener('activate', e => e.waitUntil(caches.keys().then(k => Promise.all(k.filter(x => x !== C).map(x => caches.delete(x))))));
-self.addEventListener('fetch', e => e.respondWith(caches.match(e.request).then(r => r || fetch(e.request))));
