@@ -35,7 +35,10 @@ table{border-collapse:separate;border-spacing:0;width:100%;background:var(--card
 th,td{border-bottom:1px solid var(--line);border-left:1px solid var(--line);padding:6px;text-align:center;white-space:nowrap;font-size:14px}
 thead th{position:sticky;top:0;z-index:3;background:var(--pri);color:#fff}
 tbody th{position:sticky;right:0;z-index:2;background:var(--card);font-weight:700;text-align:right;border-left:2px solid var(--line)}
-tr.today td,tr.today th{background:color-mix(in srgb,var(--ok) 14%,var(--card))!important;border-top:2px solid var(--ok);border-bottom:2px solid var(--ok)}
+/* سطر اليوم: إطار أخضر سميك حول السطر كله، وخلفيات الخلايا (ألوان القوائم) تبقى كما هي. التظليل لخلية اسم اليوم فقط */
+tr.today td,tr.today th{border-top:3px solid var(--ok);border-bottom:3px solid var(--ok)}
+tr.today th{background:color-mix(in srgb,var(--ok) 14%,var(--card));border-right:3px solid var(--ok)}
+tr.today td:last-child{border-left:3px solid var(--ok)}
 td input:not([type=checkbox]),td select{width:100%;min-width:70px;padding:6px;text-align:center}
 .key{font-weight:700;color:var(--pri)}
 .cards{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;padding-bottom:10px;align-items:flex-start}
