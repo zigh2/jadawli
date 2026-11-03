@@ -345,6 +345,12 @@ function field(t, r, c, card) {
 }
 const hidKey = (t, c) => t.keyCols.includes(c.name) && (c.name === 'التاريخ' || c.name === 'اليوم');
 const shortLabel = r => { const m = /^\d{4}-\d{2}-(\d{2}) \((.+)\)$/.exec(r); return m ? `${m[1]} ${m[2]}` : r; };
+/* خط فاصل بعد العمود: c.sep = { c: '#rrggbb', w: 1..8 }، يُرسم على الحافة اليسرى للعمود (المجاورة للعمود التالي في الواجهة العربية) */
+const sepOf = c => (c && c.sep && /^#[0-9a-f]{6}$/i.test(c.sep.c || '') && +c.sep.w >= 1) ? { c: c.sep.c, w: Math.min(8, Math.max(1, Math.round(+c.sep.w))) } : null;
+const sepCss = c => { const q = sepOf(c); return q ? `border-left:${q.w}px solid ${q.c}` : ''; };
+const parseSep = x => { try { return JSON.parse(x || 'null'); } catch (e) { return null; } };
+/* يضبط نمط خلية رأس العمود (العرض + الخط الفاصل + إزاحة التثبيت تحت سطر المجموعات) دفعة واحدة كي لا يمحو أحدها الآخر */
+const setTh = (th, css) => { th.style.cssText = [css, th.dataset.sep, th.dataset.top ? 'top:' + th.dataset.top : ''].filter(Boolean).join(';'); };
 const colStyle = c => { const w = c.width || (c.type === 'checkbox' ? '58' : ''); return w ? `width:${w}px;min-width:${w}px;max-width:${w}px` : ''; };
 const clampZ = z => Math.min(2, Math.max(0.5, Math.round(z * 100) / 100));
 let zt;
@@ -365,7 +371,7 @@ async function askWidth(t, c, th) {
   const cur = c.width || String(Math.round(th.getBoundingClientRect().width / (S.zoom || 1)));
   const v = await widthBox(c, cur);
   if (v == null) return;
-  c.width = v; th.style.cssText = colStyle(c); DB.putTable(t).then(flash);
+  c.width = v; setTh(th, colStyle(c)); DB.putTable(t).then(flash);
 }
 function startResize(e, t, c, th) {
   e.preventDefault(); e.stopPropagation();
@@ -376,32 +382,52 @@ function startResize(e, t, c, th) {
   const lp = setTimeout(() => { if (!moved && !done) { end(); askWidth(t, c, th); } }, 600);   // ضغط مطول بلا حركة: إدخال رقم
   const mv = ev => {
     if (Math.hypot(ev.clientX - x0, ev.clientY - y0) > 6) { moved = true; clearTimeout(lp); }
-    if (moved) { w = Math.max(40, Math.min(600, Math.round(w0 + (x0 - ev.clientX) / z))); th.style.cssText = `width:${w}px;min-width:${w}px;max-width:${w}px`; }
+    if (moved) { w = Math.max(40, Math.min(600, Math.round(w0 + (x0 - ev.clientX) / z))); setTh(th, `width:${w}px;min-width:${w}px;max-width:${w}px`); }
   };
   const up = () => { const was = moved && !done; end(); if (was) { c.width = String(w); DB.putTable(t).then(flash); } };
   tg.addEventListener('pointermove', mv); tg.addEventListener('pointerup', up); tg.addEventListener('pointercancel', up);
 }
 function tableView(t, ti) {
   const cs = orderedCols(t).filter(c => !hidKey(t, c));
+  const sepAt = new Map(cs.map((c, i) => [c.name, i < cs.length - 1 ? sepCss(c) : '']));   // لا خط بعد آخر عمود
   const head = c => {
-    const th = h('th', { style: colStyle(c) }, c.name);
+    const th = h('th', {}, c.name);
+    if (sepAt.get(c.name)) th.dataset.sep = sepAt.get(c.name);
+    setTh(th, colStyle(c));
     let lp, sx = 0, sy = 0;
     th.addEventListener('pointerdown', e => { if (e.target.classList.contains('rz')) return; sx = e.clientX; sy = e.clientY; clearTimeout(lp); lp = setTimeout(() => askWidth(t, c, th), 600); });
     th.addEventListener('pointermove', e => { if (Math.hypot(e.clientX - sx, e.clientY - sy) > 10) clearTimeout(lp); });
     ['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => th.addEventListener(ev, () => clearTimeout(lp)));
     th.append(h('span', { class: 'rz', onpointerdown: e => startResize(e, t, c, th),
-      ondblclick: () => { c.width = ''; th.style.cssText = colStyle(c); DB.putTable(t).then(flash); } }));   // بلا إعادة رسم فلا يقفز الجدول
+      ondblclick: () => { c.width = ''; setTh(th, colStyle(c)); DB.putTable(t).then(flash); } }));   // بلا إعادة رسم فلا يقفز الجدول
     return th;
   };
+  /* سطر المجموعات: خلية مدموجة فوق أعمدة كل مجموعة، ويُخفى من الإعدادات */
+  let ghead = null;
+  if (S.meta.showGroups !== false && cs.some(c => c.group)) {
+    const cells = [];
+    for (let i = 0; i < cs.length;) {
+      const g = cs[i].group || ''; let j = i;
+      while (j + 1 < cs.length && (cs[j + 1].group || '') === g) j++;
+      const gt = h('th', { class: 'gh' + (g ? '' : ' none'), colSpan: j - i + 1 }, g);
+      if (sepAt.get(cs[j].name)) gt.style.cssText = sepAt.get(cs[j].name);
+      cells.push(gt); i = j + 1;
+    }
+    ghead = h('tr', { class: 'ghead' }, h('th', { class: 'gh none' }), cells);
+  }
   const tbl = h('table', {},
-    h('thead', {}, h('tr', {}, h('th', {}, '#'), cs.map(head))),
+    h('thead', {}, ghead, h('tr', { class: 'hrow' }, h('th', {}, '#'), cs.map(head))),
     h('tbody', {}, t.rows.map((r, i) => h('tr', { class: i === ti ? 'today' : '' },
       h('th', { scope: 'row', class: S.notes.row[r] ? 'hasnote' : '', title: 'ملاحظة اليوم', onclick: async e => {
         const th = e.currentTarget, v = await rowNoteBox(t, r);
         if (v == null) return;
         setNote('row', t.id, r, v); th.classList.toggle('hasnote', !!v);
       } }, shortLabel(r)),
-      cs.map(c => { const td = h('td', {}, field(t, r, c)); paint(td, c, val(t, r, c.name)); return td; })))));
+      cs.map(c => { const td = h('td', {}, field(t, r, c)); if (sepAt.get(c.name)) td.style.cssText = sepAt.get(c.name); paint(td, c, val(t, r, c.name)); return td; })))));
+  if (ghead) {   // سطر العناوين يُثبَّت أسفل سطر المجموعات مباشرة (الارتفاع يتغير بحجم الخط فيُقاس بعد الرسم)
+    const fix = () => { if (!tbl.isConnected) return false; const hh = ghead.getBoundingClientRect().height / (S.zoom || 1); tbl.querySelectorAll('thead tr.hrow th').forEach(th => { th.dataset.top = hh + 'px'; th.style.top = hh + 'px'; }); return true; };
+    requestAnimationFrame(() => { if (!fix()) setTimeout(fix, 150); });
+  }
   tbl.style.zoom = S.zoom || 1; tbl.style.setProperty('--tfs', (S.meta.tfs || 14) + 'px');
   const pane = h('div', { class: 'pane' }, tbl);
   /* قرص بإصبعين للتكبير والتصغير؛ أزرار التكبير في الزر العائم */
@@ -420,11 +446,13 @@ function cardEl(t, i, ti) {
     prog.textContent = `${d} / ${cbs.length}`; fill.style.width = (cbs.length ? Math.round(d / cbs.length * 100) : 0) + '%';
   };
   let last = null;
-  const body = cs.map(c => {
-    const g = c.group || (anyG ? 'أخرى' : ''), head = g && g !== last ? h('h4', { class: 'grp' }, g) : null; last = g;
+  const showG = S.meta.showGroups !== false;
+  const body = cs.map((c, ci) => {
+    const g = c.group || (anyG ? 'أخرى' : ''), head = showG && g && g !== last ? h('h4', { class: 'grp' }, g) : null; last = g;
     const tag = ['number', 'time', 'duration'].includes(c.type) ? 'div' : 'label';
     const row = h(tag, { class: 'f' + (c.type === 'checkbox' ? ' chk' : '') }, h('span', {}, c.name), field(t, r, c, true)); paint(row, c, val(t, r, c.name));
-    return [head, row];   // الاسم على اليمين ثم القيمة في السطر نفسه
+    const sp = ci < cs.length - 1 ? sepOf(c) : null, line = sp ? h('hr', { class: 'sepl', style: `border:0;border-top:${sp.w}px solid ${sp.c}` }) : null;
+    return [head, row, line];   // الاسم على اليمين ثم القيمة في السطر نفسه، ثم الخط الفاصل إن وُجد
   });
   const note = autoGrow(h('textarea', { rows: 3, placeholder: 'اكتب ملاحظة لهذا اليوم…', value: S.notes.row[r] || '' }));
   let nt; note.addEventListener('input', () => { clearTimeout(nt); nt = setTimeout(() => setNote('row', t.id, r, note.value.trim()), 500); });
@@ -620,12 +648,13 @@ function colRow(c, isKey) {
   const badge = h('span', { class: 'gbadge' });
   const cbtn = h('button', { type: 'button', class: 'btn sm ghost', onclick: () => editColors(el, opts) }, '🎨 ألوان الخيارات');
   const clbtn = h('button', { type: 'button', class: 'btn sm ghost', onclick: () => cloneOptions(el, opts) }, '📋 استنساخ من قائمة');
+  const sbtn = h('button', { type: 'button', class: 'btn sm ghost', onclick: () => editSep(el) }, '┃ خط فاصل بعد العمود');
   function sync() { const lst = ['select', 'combo'].includes(typ.value); opts.hidden = !lst; cbtn.hidden = !lst; clbtn.hidden = !lst; }
   sync();
-  const el = h('div', { class: 'crow', 'data-orig': c.name || '', 'data-grp': c.group || '', 'data-width': c.width || '', 'data-key': isKey ? '1' : '', 'data-colors': c.colors ? JSON.stringify(c.colors) : '' }, h('span', { class: 'drag' }, '☰'),
+  const el = h('div', { class: 'crow', 'data-orig': c.name || '', 'data-grp': c.group || '', 'data-width': c.width || '', 'data-key': isKey ? '1' : '', 'data-colors': c.colors ? JSON.stringify(c.colors) : '', 'data-sep': sepOf(c) ? JSON.stringify(sepOf(c)) : '' }, h('span', { class: 'drag' }, '☰'),
     h('input', { class: 'cname', placeholder: 'اسم العمود', value: c.name || '' }), typ,
-    h('button', { class: 'x', title: 'حذف', onclick: e => { const row = e.currentTarget.closest('.crow'), p = row.parentNode; row.remove(); p.dispatchEvent(new Event('colchange')); } }, '✕'), badge, opts, cbtn, clbtn);
-  el.refresh = () => { const g = el.dataset.grp, k = el.dataset.key === '1'; badge.textContent = [g ? '🏷 ' + g : '', k ? '🔑 مفتاحي' : ''].filter(Boolean).join('   '); badge.hidden = !g && !k; };
+    h('button', { class: 'x', title: 'حذف', onclick: e => { const row = e.currentTarget.closest('.crow'), p = row.parentNode; row.remove(); p.dispatchEvent(new Event('colchange')); } }, '✕'), badge, opts, cbtn, clbtn, sbtn);
+  el.refresh = () => { const g = el.dataset.grp, k = el.dataset.key === '1', q = sepOf({ sep: parseSep(el.dataset.sep) }); badge.textContent = [g ? '🏷 ' + g : '', k ? '🔑 مفتاحي' : '', q ? `┃ خط بعده (${q.w}px)` : ''].filter(Boolean).join('   '); badge.hidden = !g && !k && !q; };
   el.refresh();
   return el;
 }
@@ -641,6 +670,28 @@ async function cloneOptions(el, opts) {
   if (!r) return;
   const s = srcs[+r.v]; opts.value = s.options; el.dataset.colors = Object.keys(s.colors).length ? JSON.stringify(s.colors) : '';
   toast('تم استنساخ الخيارات' + (Object.keys(s.colors).length ? ' والألوان' : ''));
+}
+/* نافذة الخط الفاصل: تفعيل، لون، وسمك من 1 إلى 8 بكسل، مع معاينة */
+async function editSep(el) {
+  const cur = sepOf({ sep: parseSep(el.dataset.sep) });
+  let on = !!cur, col = cur ? cur.c : '#64748b', w = cur ? cur.w : 2;
+  const res = await modal(close => {
+    const line = h('div', { class: 'seppreview' }), num = h('b', {});
+    const draw = () => { line.style.cssText = `border-top:${w}px solid ${col};opacity:${on ? 1 : .25}`; num.textContent = w + ' px'; };
+    const chk = h('input', { type: 'checkbox', checked: on, onchange: e => { on = e.target.checked; draw(); } });
+    const rng = h('input', { type: 'range', min: 1, max: 8, step: 1, value: w, class: 'rng', oninput: e => { w = +e.target.value; draw(); } });
+    const sw = Colors.row(col, c => { if (c) { col = c; draw(); } }, { title: 'لون الخط' });
+    draw();
+    return [h('p', { class: 'ptitle' }, 'خط فاصل بين هذا العمود والعمود التالي'),
+      h('label', { class: 'kchk' }, chk, 'إظهار الخط'),
+      h('p', { class: 'msg' }, 'اللون'), sw,
+      h('div', { class: 'sl' }, h('label', {}, 'السمك'), rng, num), line,
+      h('p', { class: 'msg' }, 'في الجدول خط عمودي، وفي البطاقات خط أفقي بين الحقلين.'),
+      h('div', { class: 'btns' }, h('button', { class: 'btn ghost', type: 'button', onclick: () => close(null) }, 'إلغاء'), h('button', { type: 'button', onclick: () => close({ on, c: col, w }) }, 'حفظ'))];
+  });
+  if (!res) return;
+  el.dataset.sep = res.on ? JSON.stringify({ c: res.c, w: res.w }) : '';
+  el.refresh();
 }
 async function editColors(el, opts) {
   const names = opts.value.split(',').map(x => x.trim()).filter(Boolean);
@@ -734,14 +785,14 @@ function renderEdit(bar, view, arg) {
   cols.addEventListener('colchange', () => { redraw(); kdraw(); });
   const save = async () => {
     const name = title.value.trim();
-    const C = colEls().map(el => ({ name: $('.cname', el).value.trim(), type: $('.ctype', el).value, width: el.dataset.width || '', options: $('.copts', el).value.trim(), group: el.dataset.grp || '', key: el.dataset.key === '1', orig: el.dataset.orig, colors: (() => { try { return JSON.parse(el.dataset.colors || '{}'); } catch (e) { return {}; } })() })).filter(c => c.name);
+    const C = colEls().map(el => ({ name: $('.cname', el).value.trim(), type: $('.ctype', el).value, width: el.dataset.width || '', options: $('.copts', el).value.trim(), group: el.dataset.grp || '', key: el.dataset.key === '1', orig: el.dataset.orig, colors: (() => { try { return JSON.parse(el.dataset.colors || '{}'); } catch (e) { return {}; } })(), sep: parseSep(el.dataset.sep) })).filter(c => c.name);
     const R = $$('.rrow', rows).map(el => ({ name: $('.rname', el).value.trim(), orig: el.dataset.orig })).filter(r => r.name);
     if (!name) return toast('أدخل عنواناً', true);
     if (taken(name, old && old.id)) return toast('العنوان مستخدم مسبقاً', true);
     if (!C.length) return toast('أضف عموداً واحداً على الأقل', true);
     if (new Set(C.map(c => c.name)).size !== C.length) return toast('أسماء الأعمدة يجب ألا تتكرر', true);
     if (new Set(R.map(r => r.name)).size !== R.length) return toast('مفاتيح الأسطر يجب ألا تتكرر', true);
-    const rec = { title: name, isTemplate: tmpl.checked, keyCols: C.filter(c => c.key).map(c => c.name), columns: C.map(({ name, type, width, options, group, colors }) => Object.assign({ name, type, width, options, group }, Object.keys(colors).length ? { colors } : {})), rows: R.map(r => r.name) };
+    const rec = { title: name, isTemplate: tmpl.checked, keyCols: C.filter(c => c.key).map(c => c.name), columns: C.map(({ name, type, width, options, group, colors, sep }) => Object.assign({ name, type, width, options, group }, Object.keys(colors).length ? { colors } : {}, sepOf({ sep }) ? { sep: sepOf({ sep }) } : {})), rows: R.map(r => r.name) };
     if (old) { rec.id = old.id; rec.uid = old.uid; rec.sync = old.sync; }
     const id = await DB.putTable(rec);
     if (old) {
@@ -889,7 +940,7 @@ function validBackup(j) {
 const choiceBox = (msg, opts) => modal(close => [h('p', {}, msg), h('div', { class: 'btns', style: 'flex-direction:column' },
   opts.map(([k, l]) => h('button', { class: k === 'replace' ? 'danger' : '', onclick: () => close(k) }, l)), h('button', { class: 'btn ghost', onclick: () => close(null) }, 'إلغاء'))]);
 const cleanTable = t => ({ id: t.id, uid: t.uid ? String(t.uid) : undefined, title: String(t.title), isTemplate: !!t.isTemplate, keyCols: t.keyCols.map(String), rows: t.rows.map(String),
-  columns: t.columns.map(c => Object.assign({ name: String(c.name), type: TYPES[c.type] ? c.type : 'text', width: String(c.width || ''), options: String(c.options || ''), group: String(c.group || '') }, c.colors && typeof c.colors === 'object' ? { colors: Object.fromEntries(Object.entries(c.colors).filter(([k, v]) => /^#[0-9a-f]{6}$/i.test(v)).map(([k, v]) => [String(k), v])) } : {})) });
+  columns: t.columns.map(c => Object.assign({ name: String(c.name), type: TYPES[c.type] ? c.type : 'text', width: String(c.width || ''), options: String(c.options || ''), group: String(c.group || '') }, c.colors && typeof c.colors === 'object' ? { colors: Object.fromEntries(Object.entries(c.colors).filter(([k, v]) => /^#[0-9a-f]{6}$/i.test(v)).map(([k, v]) => [String(k), v])) } : {}, sepOf(c) ? { sep: sepOf(c) } : {})) });
 async function doImport(f) {
   let j; try { j = JSON.parse(await f.text()); } catch (e) { return toast('الملف غير صالح', true); }
   if (!validBackup(j)) return toast('هذه ليست نسخة احتياطية صالحة', true);
@@ -948,6 +999,7 @@ function renderSettings(bar, view) {
         [11, 12, 13, 14, 15, 16, 18, 20, 22, 24].map(n => h('option', { value: n, selected: (S.meta.tfs || 14) === n }, n + (n === 14 ? ' (الافتراضي)' : '')))), 'في الجدول فقط؛ لا يغيّر البطاقات ولا بقية التطبيق'),
       row('العرض الافتراضي للبيانات', h('select', { onchange: async e => { S.view = e.target.value === 'auto' ? null : e.target.value; await meta('view', S.view); } },
         [['auto', 'تلقائي (بحسب عدد الأعمدة)'], ['table', 'جدول'], ['card', 'بطاقة'], ['all', 'كل البطاقات']].map(([k, l]) => h('option', { value: k, selected: (S.view || 'auto') === k }, l)))),
+      row('إظهار سطر المجموعات', tog(S.meta.showGroups !== false, async on => { await meta('showGroups', on); }), 'أعلى الجدول وفوق حقول كل بطاقة. الإخفاء لا يغيّر ترتيب الأعمدة'),
       null),
     h('section', { class: 'sec' }, h('h2', {}, 'الأمان'),
       row('قفل برقم سري', tog(S.meta.pinLock, async on => {

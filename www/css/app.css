@@ -275,3 +275,9 @@ td.colored select,td.colored input{background:transparent!important}
 .chklist{max-height:48vh;overflow:auto;margin:6px 0 10px}
 .chk{display:flex;align-items:center;gap:10px;padding:10px 6px;border-bottom:1px solid var(--line)}
 .chk input{width:22px;height:22px;flex-shrink:0}.chk span{flex:1}.chk small{color:var(--mute);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:1px 8px}
+
+/* سطر المجموعات أعلى الجدول (يُثبَّت فوق سطر العناوين) */
+thead tr.ghead th{top:0;background:var(--pri-h);font-weight:700;border-left:1px solid rgba(255,255,255,.35);border-bottom:1px solid rgba(255,255,255,.35)}
+thead tr.ghead th.none{background:var(--pri)}
+/* الخط الفاصل بين حقلين في البطاقة، ومعاينته في نافذة الإعداد */
+.sepl{margin:8px 0;width:100%}.seppreview{margin:14px 0;height:0}

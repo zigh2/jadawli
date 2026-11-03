@@ -1,7 +1,7 @@
 /* نسخ احتياطي مشفّر (zip بتشفير AES-256 يُفتح بـ 7-Zip) يومياً إلى Download/Jadawli/Backup، واستعادة منه. */
 (() => {
 const A = () => window.App;
-const KEEP_SETTINGS = ['theme', 'pri', 'acc', 'palette', 'view', 'zoom', 'tfs', 'clock12', 'alarms'];
+const KEEP_SETTINGS = ['theme', 'pri', 'acc', 'palette', 'view', 'zoom', 'tfs', 'clock12', 'alarms', 'showGroups'];
 const cfg = () => A().S.meta.backup || {};
 let busy = false;
 
