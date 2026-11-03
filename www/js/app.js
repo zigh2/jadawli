@@ -430,12 +430,33 @@ function tableView(t, ti) {
   }
   tbl.style.zoom = S.zoom || 1; tbl.style.setProperty('--tfs', (S.meta.tfs || 14) + 'px');
   const pane = h('div', { class: 'pane' }, tbl);
-  /* قرص بإصبعين للتكبير والتصغير؛ أزرار التكبير في الزر العائم */
-  let d0 = 0, z0 = 1;
+  /* قرص بإصبعين للتكبير والتصغير؛ أزرار التكبير في الزر العائم.
+     السرعة: أثناء القرص لا نغيّر خاصية zoom (تعيد تخطيط الجدول كله مع كل حركة وهو سبب البطء)، بل نكبّر بـ transform على المعالج الرسومي
+     حول نقطة القرص بلا أي إعادة تخطيط، ثم نثبّت الزوم الحقيقي مرة واحدة عند رفع الإصبعين ونعيد ضبط التمرير ليبقى مكان القرص ثابتاً. */
+  let g = null, raf = 0;
   const dist = ts => Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY);
-  pane.addEventListener('touchstart', e => { if (e.touches.length === 2) { d0 = dist(e.touches); z0 = S.zoom || 1; } }, { passive: true });
-  pane.addEventListener('touchmove', e => { if (e.touches.length === 2 && d0) { e.preventDefault(); setZoom(tbl, z0 * dist(e.touches) / d0); } }, { passive: false });
-  pane.addEventListener('touchend', e => { if (e.touches.length < 2) d0 = 0; }, { passive: true });
+  const commit = () => {
+    if (!g) return; const k = g; g = null; cancelAnimationFrame(raf);
+    tbl.style.transform = ''; tbl.style.transformOrigin = ''; tbl.style.willChange = '';
+    if (k.z === k.z0) return;
+    setZoom(tbl, k.z);
+    const r = tbl.getBoundingClientRect(), z = S.zoom;   // بعد التثبيت: أعد المحتوى الذي كان تحت الإصبعين إلى مكانه
+    pane.scrollLeft += r.left + k.px * z - k.cx; pane.scrollTop += r.top + k.py * z - k.cy;
+  };
+  pane.addEventListener('touchstart', e => {
+    if (e.touches.length !== 2) return;
+    const t = e.touches, r = tbl.getBoundingClientRect(), z0 = S.zoom || 1, cx = (t[0].clientX + t[1].clientX) / 2, cy = (t[0].clientY + t[1].clientY) / 2;
+    g = { d0: dist(t), z0, z: z0, cx, cy, px: (cx - r.left) / z0, py: (cy - r.top) / z0 };
+    tbl.style.transformOrigin = `${(cx - r.left) / r.width * 100}% ${(cy - r.top) / r.height * 100}%`; tbl.style.willChange = 'transform';
+  }, { passive: true });
+  pane.addEventListener('touchmove', e => {
+    if (!g || e.touches.length !== 2) return;
+    e.preventDefault();
+    g.z = clampZ(g.z0 * dist(e.touches) / g.d0);
+    if (!raf) raf = requestAnimationFrame(() => { raf = 0; if (!g) return; tbl.style.transform = `scale(${g.z / g.z0})`; $$('.zpct').forEach(l => { l.textContent = Math.round(g.z * 100) + '%'; }); });
+  }, { passive: false });
+  pane.addEventListener('touchend', e => { if (e.touches.length < 2) commit(); }, { passive: true });
+  pane.addEventListener('touchcancel', commit, { passive: true });
   return h('div', { class: 'zwrap' }, pane);
 }
 function cardEl(t, i, ti) {
@@ -472,9 +493,9 @@ function singleView(t, ti) {
     if (Math.abs(dx) > 70) go(S.idx + (dx < 0 ? 1 : -1));
   } },
     h('div', { class: 'cnav' },
-      h('button', { class: 'ib', onclick: () => go(S.idx - 1), disabled: S.idx === 0 }, '›'),
+      h('button', { class: 'ib', onclick: () => go(S.idx - 1), disabled: S.idx === 0, title: 'اليوم السابق', 'aria-label': 'اليوم السابق' }, h('i', { class: 'chev r' })),
       h('select', { onchange: e => go(+e.target.value) }, t.rows.map((r, i) => h('option', { value: i, selected: i === S.idx }, r))),
-      h('button', { class: 'ib', onclick: () => go(S.idx + 1), disabled: S.idx === n - 1 }, '‹')),
+      h('button', { class: 'ib', onclick: () => go(S.idx + 1), disabled: S.idx === n - 1, title: 'اليوم التالي', 'aria-label': 'اليوم التالي' }, h('i', { class: 'chev l' }))),
     cardEl(t, S.idx, ti));
 }
 const allView = (t, ti) => h('div', { class: 'pane' }, h('div', { class: 'cards' }, t.rows.map((_, i) => cardEl(t, i, ti))));

@@ -281,3 +281,8 @@ thead tr.ghead th{top:0;background:var(--pri-h);font-weight:700;border-left:1px 
 thead tr.ghead th.none{background:var(--pri)}
 /* الخط الفاصل بين حقلين في البطاقة، ومعاينته في نافذة الإعداد */
 .sepl{margin:8px 0;width:100%}.seppreview{margin:14px 0;height:0}
+
+/* أسهم التنقل بين البطاقات مرسومة بـ CSS (الرموز ‹ › تنعكس تلقائياً في الصفحة العربية فتشير للجهة نفسها). كلاهما يشير للخارج: اليميني ← اليوم السابق، واليساري ← اليوم التالي */
+.chev{display:inline-block;width:10px;height:10px;border:solid currentColor;border-width:0 2.5px 2.5px 0;pointer-events:none}
+.chev.r{transform:rotate(-45deg);margin-right:4px}.chev.l{transform:rotate(135deg);margin-left:4px}
+.cnav .ib{display:flex;align-items:center;justify-content:center}
